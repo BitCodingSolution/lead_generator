@@ -1,0 +1,509 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top" />
+  <meta charset="utf-8" />
+  <style>
+    :root {
+      --bg:        #ffffff;
+      --bg-alt:    #f7f5fb;
+      --border:    #e1e4e8;
+      --text:      #1f2328;
+      --text-soft: #57606a;
+      --muted:     #8b949e;
+      --accent:    #7b2cbf;
+      --accent-2:  #9d4edd;
+      --good:      #1a7f37;
+      --warn:      #cf8b00;
+      --bad:       #cf222e;
+      --bar-bg:    #eee2f5;
+      --shadow:    0 1px 3px rgba(123,44,191,0.10);
+      --r-md:      8px;
+      --r-lg:      12px;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      margin: 0;
+      padding: 14px 14px 18px 14px;
+      color: var(--text);
+      background: linear-gradient(180deg, #ffffff 0%, #fbf8ff 100%);
+      font-size: 13px;
+      line-height: 1.4;
+    }
+
+    h2.title {
+      font-size: 14px;
+      margin: 0 0 4px 0;
+      color: var(--accent);
+      letter-spacing: -0.2px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .subtitle {
+      font-size: 10.5px;
+      color: var(--muted);
+      margin: 0 0 12px 0;
+      font-style: italic;
+    }
+
+    /* Hero progress card */
+    .hero {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--accent);
+      border-radius: var(--r-lg);
+      padding: 12px 14px;
+      margin-bottom: 12px;
+      box-shadow: var(--shadow);
+    }
+    .hero-top {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      margin-bottom: 8px;
+    }
+    .hero-frac {
+      font-size: 22px;
+      font-weight: 800;
+      color: var(--text);
+      letter-spacing: -0.5px;
+    }
+    .hero-frac em {
+      font-style: normal;
+      color: var(--muted);
+      font-weight: 600;
+      font-size: 18px;
+    }
+    .hero-pct {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--accent);
+    }
+
+    .bar {
+      width: 100%;
+      height: 10px;
+      background: var(--bar-bg);
+      border-radius: 999px;
+      overflow: hidden;
+      position: relative;
+    }
+    .bar-fill {
+      height: 100%;
+      background: linear-gradient(90deg, var(--accent), var(--accent-2));
+      border-radius: 999px;
+      transition: width 0.5s ease;
+      width: 0%;
+    }
+    .bar-fill.complete {
+      background: linear-gradient(90deg, #2da44e, #46c463);
+    }
+    .bar-fill.idle {
+      background: #c9d1d9;
+    }
+
+    .hero-status {
+      margin-top: 10px;
+      font-size: 11.5px;
+      color: var(--text-soft);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .pulse {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--good);
+      box-shadow: 0 0 0 0 rgba(26,127,55,0.5);
+      animation: pulse 1.6s infinite;
+    }
+    .pulse.idle { background: #999; animation: none; }
+    .pulse.warn { background: var(--warn); animation: none; }
+    @keyframes pulse {
+      0%   { box-shadow: 0 0 0 0   rgba(26,127,55,0.5); }
+      70%  { box-shadow: 0 0 0 8px rgba(26,127,55,0); }
+      100% { box-shadow: 0 0 0 0   rgba(26,127,55,0); }
+    }
+
+    /* Stats grid — 2 cols × 2 rows */
+    .stats {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+    .stat-cell {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--r-md);
+      padding: 8px 10px;
+      box-shadow: var(--shadow);
+    }
+    .stat-label {
+      font-size: 10px;
+      color: var(--muted);
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+      margin-bottom: 2px;
+    }
+    .stat-value {
+      font-size: 16px;
+      font-weight: 700;
+      color: var(--text);
+      letter-spacing: -0.3px;
+    }
+    .stat-value.good    { color: var(--good); }
+    .stat-value.pending { color: var(--accent); }
+    .stat-value.skipped { color: var(--warn); }
+
+    /* Now-sending card */
+    .now-card {
+      background: var(--bg-alt);
+      border: 1px solid #eadcf3;
+      border-radius: var(--r-md);
+      padding: 9px 11px;
+      margin-bottom: 12px;
+    }
+    .now-card.idle {
+      background: #f6f8fa;
+      border-color: var(--border);
+    }
+    .now-label {
+      font-size: 10px;
+      color: var(--muted);
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+      margin-bottom: 2px;
+    }
+    .now-row {
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--text);
+      margin-bottom: 1px;
+    }
+    .now-email {
+      font-size: 11px;
+      color: var(--text-soft);
+      word-break: break-all;
+    }
+    .now-card.idle .now-row { color: var(--muted); }
+
+    /* Daily cap */
+    .cap-bar-wrap {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 12px;
+      font-size: 11px;
+      color: var(--text-soft);
+    }
+    .cap-bar {
+      flex: 1;
+      height: 4px;
+      background: #eee;
+      border-radius: 999px;
+      overflow: hidden;
+    }
+    .cap-fill {
+      height: 100%;
+      background: var(--accent-2);
+      transition: width 0.5s;
+    }
+    .cap-fill.warn { background: var(--warn); }
+    .cap-fill.bad  { background: var(--bad); }
+
+    /* Stop button */
+    .actions {
+      display: flex;
+      gap: 6px;
+      margin-bottom: 10px;
+    }
+    .stop-btn {
+      flex: 1;
+      padding: 9px 10px;
+      background: #fff;
+      border: 1px solid var(--bad);
+      color: var(--bad);
+      font-weight: 700;
+      border-radius: var(--r-md);
+      cursor: pointer;
+      font-size: 12px;
+      transition: all 0.15s;
+    }
+    .stop-btn:hover:not(:disabled) {
+      background: var(--bad);
+      color: #fff;
+    }
+    .stop-btn:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+      border-color: var(--border);
+      color: var(--muted);
+    }
+
+    .footer {
+      font-size: 10px;
+      color: var(--muted);
+      text-align: center;
+      margin-top: 6px;
+      font-style: italic;
+    }
+
+    .quiet-banner {
+      background: #fff8e1;
+      border: 1px solid #f0d779;
+      color: #7a5a00;
+      padding: 7px 9px;
+      border-radius: var(--r-md);
+      font-size: 11px;
+      margin-bottom: 10px;
+      display: none;
+    }
+  </style>
+</head>
+<body>
+  <h2 class="title">📬 Email Queue</h2>
+  <p class="subtitle">Live progress · auto-refresh every 3s</p>
+
+  <div class="quiet-banner" id="quietBanner">
+    🌙 Quiet hours active (11pm–7am). Sending paused until 7am.
+  </div>
+
+  <div class="hero">
+    <div class="hero-top">
+      <div class="hero-frac">
+        <span id="doneNum">0</span><em> / <span id="totalNum">0</span></em>
+      </div>
+      <div class="hero-pct"><span id="pctNum">0</span>%</div>
+    </div>
+    <div class="bar">
+      <div class="bar-fill" id="barFill"></div>
+    </div>
+    <div class="hero-status">
+      <span class="pulse" id="pulse"></span>
+      <span id="statusText">Loading…</span>
+    </div>
+  </div>
+
+  <div class="stats">
+    <div class="stat-cell">
+      <div class="stat-label">✅ Sent</div>
+      <div class="stat-value good" id="sentNum">0</div>
+    </div>
+    <div class="stat-cell">
+      <div class="stat-label">⏳ Pending</div>
+      <div class="stat-value pending" id="pendingNum">0</div>
+    </div>
+    <div class="stat-cell">
+      <div class="stat-label">⏭ Skipped</div>
+      <div class="stat-value skipped" id="skippedNum">0</div>
+    </div>
+    <div class="stat-cell">
+      <div class="stat-label">⏱ Elapsed</div>
+      <div class="stat-value" id="elapsedTxt">—</div>
+    </div>
+  </div>
+
+  <div class="now-card" id="nowCard">
+    <div class="now-label">📨 Now sending</div>
+    <div class="now-row" id="nowRow">—</div>
+    <div class="now-email" id="nowEmail"></div>
+  </div>
+
+  <div style="font-size: 11px; color: var(--text-soft); margin-bottom: 6px; display: flex; justify-content: space-between;">
+    <span>⏰ ETA: <strong id="etaTxt">—</strong></span>
+    <span>📅 Today: <strong id="capTxt">0/20</strong></span>
+  </div>
+
+  <div class="cap-bar-wrap">
+    <span style="font-size: 10px; color: var(--muted);">Daily cap</span>
+    <div class="cap-bar"><div class="cap-fill" id="capFill"></div></div>
+  </div>
+
+  <div class="actions">
+    <button class="stop-btn" id="stopBtn" disabled>⏹ Stop queue</button>
+  </div>
+
+  <p class="footer" id="footerTxt">Refreshing…</p>
+
+  <script>
+    var REFRESH_MS = 3000;     // server poll cadence (heavy — Apps Script call)
+    var SMOOTH_MS  = 250;      // local interpolation tick (cheap — DOM only)
+    var NOMINAL_PER_ROW_MS = 75 * 1000; // mid of 60-90s send delay
+
+    var refreshing = false;
+    var stopping = false;
+    var lastServer = null;     // last snapshot from getQueueProgress
+    var lastServerAt = 0;      // when we received it (ms epoch)
+
+    function $(id) { return document.getElementById(id); }
+
+    function fmtDuration(ms) {
+      if (!ms || ms < 0) return '—';
+      var s = Math.round(ms / 1000);
+      if (s < 60) return s + 's';
+      var m = Math.floor(s / 60);
+      var sec = s % 60;
+      if (m < 60) return sec ? (m + 'm ' + sec + 's') : (m + 'm');
+      var h = Math.floor(m / 60);
+      var rem = m % 60;
+      return rem ? (h + 'h ' + rem + 'm') : (h + 'h');
+    }
+
+    // Interpolate the last server snapshot forward to "now" so the bar
+    // creeps continuously between 3-second polls instead of freezing then
+    // jumping. Uses the per-row rate observed so far (or a 75s default
+    // before any rows have completed).
+    function smoothed() {
+      if (!lastServer) return null;
+      var p = lastServer;
+      var clientElapsedMs = Date.now() - lastServerAt;
+      var elapsedMs = (p.elapsedMs || 0) + (p.running ? clientElapsedMs : 0);
+      var etaMs = p.etaMs ? Math.max(0, p.etaMs - clientElapsedMs) : 0;
+
+      // Cap interpolation at done+0.95 so we don't visually claim a row
+      // finished before the server actually confirms it.
+      var smoothDone = p.done;
+      if (p.running && p.done < p.total) {
+        var perRowMs = (p.done > 0 && p.elapsedMs)
+          ? (p.elapsedMs / p.done)
+          : NOMINAL_PER_ROW_MS;
+        var fraction = Math.min(0.95, clientElapsedMs / perRowMs);
+        smoothDone = p.done + fraction;
+      }
+      var smoothPct = p.total > 0
+        ? Math.min(100, (smoothDone / p.total) * 100)
+        : 0;
+
+      return {
+        running: p.running, total: p.total, done: p.done,
+        sent: p.sent, skipped: p.skipped, pending: p.pending,
+        smoothPct: smoothPct,
+        elapsedMs: elapsedMs, etaMs: etaMs,
+        currentRow: p.currentRow, currentEmail: p.currentEmail,
+        quietHours: p.quietHours,
+        sentToday: p.sentToday, dailyCap: p.dailyCap
+      };
+    }
+
+    function render(p) {
+      $('doneNum').textContent    = p.done;
+      $('totalNum').textContent   = p.total;
+      $('pctNum').textContent     = Math.round(p.smoothPct);
+      $('sentNum').textContent    = p.sent;
+      $('pendingNum').textContent = p.pending;
+      $('skippedNum').textContent = p.skipped;
+      $('elapsedTxt').textContent = p.elapsedMs ? fmtDuration(p.elapsedMs) : '—';
+      $('etaTxt').textContent     = p.etaMs ? '~' + fmtDuration(p.etaMs) : (p.running ? 'calculating…' : '—');
+
+      var fill = $('barFill');
+      fill.style.width = p.smoothPct.toFixed(1) + '%';
+      fill.classList.remove('complete', 'idle');
+      if (!p.running && p.total === 0) {
+        fill.classList.add('idle');
+      } else if (!p.running && p.done >= p.total && p.total > 0) {
+        fill.classList.add('complete');
+      }
+
+      var pulse = $('pulse');
+      pulse.classList.remove('idle', 'warn');
+      var statusText = $('statusText');
+      if (p.running) {
+        if (p.quietHours) {
+          pulse.classList.add('warn');
+          statusText.textContent = 'Paused — quiet hours';
+        } else {
+          statusText.textContent = 'Queue running…';
+        }
+      } else if (p.total > 0 && p.done >= p.total) {
+        pulse.classList.add('idle');
+        statusText.textContent = 'Batch complete ✓';
+      } else {
+        pulse.classList.add('idle');
+        statusText.textContent = 'Idle — no batch running';
+      }
+
+      var nowCard = $('nowCard');
+      if (p.currentRow) {
+        nowCard.classList.remove('idle');
+        $('nowRow').textContent = 'Row ' + p.currentRow;
+        $('nowEmail').textContent = p.currentEmail || '';
+      } else {
+        nowCard.classList.add('idle');
+        $('nowRow').textContent = p.running ? 'waiting for next tick…' : '—';
+        $('nowEmail').textContent = '';
+      }
+
+      // Daily cap
+      var capPct = p.dailyCap > 0 ? Math.min(100, Math.round((p.sentToday / p.dailyCap) * 100)) : 0;
+      $('capTxt').textContent = p.sentToday + '/' + p.dailyCap;
+      var capFill = $('capFill');
+      capFill.style.width = capPct + '%';
+      capFill.classList.remove('warn', 'bad');
+      if (capPct >= 90)      capFill.classList.add('bad');
+      else if (capPct >= 70) capFill.classList.add('warn');
+
+      $('quietBanner').style.display = p.quietHours ? 'block' : 'none';
+
+      $('stopBtn').disabled = !p.running || stopping;
+
+      $('footerTxt').textContent = 'Server poll ' + (REFRESH_MS / 1000) + 's · smooth ' + SMOOTH_MS + 'ms';
+    }
+
+    // Cheap local re-render — uses the cached server snapshot interpolated
+    // forward to "now". Runs every SMOOTH_MS, no Apps Script call.
+    function smoothRender() {
+      var p = smoothed();
+      if (p) render(p);
+    }
+
+    function refresh() {
+      if (refreshing) return;
+      refreshing = true;
+      google.script.run
+        .withSuccessHandler(function (p) {
+          refreshing = false;
+          lastServer = p;
+          lastServerAt = Date.now();
+          smoothRender();
+        })
+        .withFailureHandler(function (err) {
+          refreshing = false;
+          $('statusText').textContent = 'Error: ' + (err.message || err);
+        })
+        .getQueueProgress();
+    }
+
+    function stopQueueFromSidebar() {
+      if (stopping) return;
+      if (!confirm('Stop the batch queue right now?\n\nUnsent rows will revert to "New" status.')) return;
+      stopping = true;
+      $('stopBtn').textContent = '⏹ Stopping…';
+      $('stopBtn').disabled = true;
+      google.script.run
+        .withSuccessHandler(function (resp) {
+          stopping = false;
+          $('stopBtn').textContent = '⏹ Stop queue';
+          refresh();
+        })
+        .withFailureHandler(function (err) {
+          stopping = false;
+          $('stopBtn').textContent = '⏹ Stop queue';
+          alert('Stop failed: ' + (err.message || err));
+        })
+        .sidebarStopQueue();
+    }
+
+    document.getElementById('stopBtn').addEventListener('click', stopQueueFromSidebar);
+
+    refresh();                            // initial server fetch
+    setInterval(refresh, REFRESH_MS);     // periodic server poll
+    setInterval(smoothRender, SMOOTH_MS); // continuous local interpolation
+  </script>
+</body>
+</html>
