@@ -1,0 +1,16 @@
+# Claude Code workspace-local settings (per-user, not shared)
+.claude/
+
+# OS cruft
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*~
+
+# Node / dependency caches (in case future tooling is added)
+node_modules/
