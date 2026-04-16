@@ -14,3 +14,5 @@ desktop.ini
 
 # Node / dependency caches (in case future tooling is added)
 node_modules/
+# Added by code-review-graph
+.code-review-graph/
