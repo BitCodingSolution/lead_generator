@@ -1,8 +1,29 @@
 // ============================================================
 // Pradip AI — Lead Tracker + Direct Email Sender
 //
-// CURRENT VERSION: v3.15
+// CURRENT VERSION: v3.16
 //
+// v3.16 changes:
+//   • RECYCLEBIN TAB — dead leads are automatically moved out of the
+//     main LinkedIn sheet into a "Recyclebin" tab so the active view
+//     stays clean. Junk criteria (any one matches): no email, bounced,
+//     Claude auto-skipped (blocked phrase / not-a-job-post), or a
+//     rejection note (rejected / not interested / declined / not a fit /
+//     no reply / dead lead) typed into columns U+.
+//   • Four auto-move triggers: (1) doPost routes new saves with no email
+//     or a Skipped:* status directly to Recyclebin; (2) onEditInstallable
+//     moves a row immediately when Jaydip types a rejection note; (3)
+//     checkBounces now moves instead of just marking Bounced; (4) manual
+//     bulk cleanup via menu → "🗑 Sweep junk → Recyclebin".
+//   • Cross-sheet duplicate check — doPost compares incoming leads
+//     against BOTH LinkedIn + Recyclebin. A lead previously moved to the
+//     bin won't slip back in when the extension rescans the same LinkedIn
+//     search page.
+//   • Recyclebin has same 21 headers as main sheet plus a "Moved to Bin
+//     At" timestamp column. Red header bar to visually distinguish.
+//   • Bugfix — stopQueue() treated queue entries as raw row numbers, but
+//     entries are objects {r, k}. Unpacks entry.r now, matching the
+//     already-correct sidebarStopQueue.
 // v3.15 changes:
 //   • Cleanup pass — pruned stale changelog (v3.5 → v3.13) referencing
 //     the long-removed Search_Extracts staging tab and the (now removed)
@@ -36,6 +57,11 @@
 // ============================================================
 
 const SHEET_NAME = 'LinkedIn';
+const RECYCLEBIN_SHEET_NAME = 'Recyclebin';
+
+// Words in a user note (columns U onwards) that mean "dead lead — move to
+// Recyclebin automatically". Case-insensitive word-boundary match.
+const REJECTION_NOTE_RE = /\b(rejected?|not interested|no interest|declined|not a fit|dead lead|no reply)\b/i;
 
 // Drive folder containing CV PDFs (smart-picked per lead)
 const DRIVE_CV_FOLDER_ID = '1g_RYUTByWXDZb-Tt8h5fHF4ZwCMDUxCP';
@@ -308,11 +334,11 @@ function doPost(e) {
   try {
     const payload = JSON.parse(e.postData.contents || '{}');
 
-    // All saves land in the main LinkedIn sheet. Scan-side leads carry
-    // tags="bulk-scan" so they can be filtered later, but routing is
-    // identical to any other webhook save.
-
-    const sheet = getOrCreateSheet();
+    // Two destinations now: live LinkedIn sheet vs Recyclebin. Auto-route
+    // junk (no email / blocked phrase / not-a-job-post) straight into
+    // Recyclebin so the main sheet stays a clean active-leads view.
+    const mainSheet    = getOrCreateSheet();
+    const recycleSheet = getOrCreateRecyclebinSheet();
 
     const force   = !!payload.force;
     const postUrl = String(payload.post_url || '').trim();
@@ -320,16 +346,35 @@ function doPost(e) {
     const role    = String(payload.role || '').trim();
     const emailForDedup = String(payload.email || '').trim();
 
+    // ── Cross-sheet dedup ──
+    // Extension-scan payloads are checked against BOTH sheets so a lead
+    // previously rejected / auto-skipped / bounced (now sitting in
+    // Recyclebin) is caught as a duplicate the next time the user re-scans
+    // the same LinkedIn search page. Otherwise they'd slowly re-accumulate
+    // in Recyclebin on every rescan.
     if (!force) {
-      const dup = findDuplicate(sheet, postUrl, company, role, emailForDedup);
-      if (dup) {
+      const dupMain = findDuplicate(mainSheet, postUrl, company, role, emailForDedup);
+      if (dupMain) {
         return jsonOut({
           ok: false,
           duplicate: true,
-          existingRow: dup.row,
-          matchType: dup.matchType,
-          matchValue: dup.matchValue,
-          message: 'Found an existing row that looks like the same lead.'
+          sheet: SHEET_NAME,
+          existingRow: dupMain.row,
+          matchType: dupMain.matchType,
+          matchValue: dupMain.matchValue,
+          message: 'Already in LinkedIn sheet.'
+        });
+      }
+      const dupBin = findDuplicate(recycleSheet, postUrl, company, role, emailForDedup);
+      if (dupBin) {
+        return jsonOut({
+          ok: false,
+          duplicate: true,
+          sheet: RECYCLEBIN_SHEET_NAME,
+          existingRow: dupBin.row,
+          matchType: dupBin.matchType,
+          matchValue: dupBin.matchValue,
+          message: 'Already in Recyclebin (' + dupBin.matchType + ') — was previously rejected or auto-skipped.'
         });
       }
     }
@@ -385,25 +430,41 @@ function doPost(e) {
       ''                                                            // U Jaydip Note (user-filled later)
     ];
 
-    // ── NEW: insert at TOP (row 2, right after the frozen header row) ──
-    sheet.insertRowBefore(2);
+    // ── Auto-route decision ──
+    // Junk criteria at save time:
+    //   - no valid email (nothing to send to)
+    //   - any "Skipped: ..." status (blocked phrase OR not-a-job-post)
+    // Routed to Recyclebin directly. Send-checkbox + batch queue don't
+    // look at Recyclebin so these rows are safely out-of-the-way.
+    const validEmail = emailSafe && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailSafe);
+    const isSkipped  = String(effectiveStatus).indexOf('Skipped:') === 0;
+    const routeToBin = !validEmail || isSkipped;
+    const targetSheet = routeToBin ? recycleSheet : mainSheet;
+
+    // Recyclebin rows get one extra "Moved to Bin At" column at the end
+    const writeRow = routeToBin ? rowData.concat([new Date()]) : rowData;
+
+    // Insert at TOP of target sheet (row 2, right after frozen header)
+    targetSheet.insertRowBefore(2);
     const newRow = 2;
+    targetSheet.getRange(newRow, 1, 1, writeRow.length).setValues([writeRow]);
 
-    // Write values
-    sheet.getRange(newRow, 1, 1, rowData.length).setValues([rowData]);
-
-    // Ensure the checkbox is present on the Send column of the new row
-    // (insertRowBefore does not always carry data-validation forward)
-    sheet.getRange(newRow, COL.SEND + 1).insertCheckboxes();
-
-    // Enforce text format on email/phone cells (preserves leading +)
-    sheet.getRange(newRow, COL.EMAIL + 1).setNumberFormat('@');
-    sheet.getRange(newRow, COL.PHONE + 1).setNumberFormat('@');
+    // Checkbox + text-format cells only matter on the LinkedIn sheet
+    // (Recyclebin rows aren't sendable anyway).
+    if (!routeToBin) {
+      targetSheet.getRange(newRow, COL.SEND + 1).insertCheckboxes();
+    }
+    targetSheet.getRange(newRow, COL.EMAIL + 1).setNumberFormat('@');
+    targetSheet.getRange(newRow, COL.PHONE + 1).setNumberFormat('@');
 
     return jsonOut({
       ok: true,
       row: newRow,
-      sheet: SHEET_NAME,
+      sheet: routeToBin ? RECYCLEBIN_SHEET_NAME : SHEET_NAME,
+      routedToBin: routeToBin,
+      binReason: routeToBin
+        ? (!validEmail ? 'no email' : ('skipped — ' + (blockedPhrase || 'not a job post')))
+        : null,
       forced: force,
       autoSkipped: !!(blockedPhrase || notJobPost),
       autoSkipReason: blockedPhrase || (notJobPost ? 'not a job post' : null)
@@ -488,6 +549,204 @@ function jsonOut(obj) {
 }
 
 // ============================================================
+// RECYCLEBIN — dead-lead staging sheet
+// ============================================================
+// Junk leads (skipped by Claude, no email, bounced, or marked rejected by
+// Jaydip) are moved out of the main LinkedIn sheet into a Recyclebin tab.
+// Keeps the main sheet clean + fast. Dedup in doPost checks BOTH sheets so
+// a previously-rejected lead scanned again won't come back in.
+
+function getOrCreateRecyclebinSheet() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sheet = ss.getSheetByName(RECYCLEBIN_SHEET_NAME);
+
+  // Mirror the main sheet's 21 headers exactly + one tracking column at end.
+  const headers = HEADERS.concat(['Moved to Bin At']);
+
+  if (!sheet) {
+    sheet = ss.insertSheet(RECYCLEBIN_SHEET_NAME);
+    sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+    sheet.getRange(1, 1, 1, headers.length)
+      .setFontWeight('bold')
+      .setBackground('#d93025')     // red — visually distinguishes from blue LinkedIn tab
+      .setFontColor('#ffffff');
+    sheet.setFrozenRows(1);
+    sheet.setFrozenColumns(1);
+    try { sheet.setHiddenGridlines(true); } catch (_) {}
+  } else {
+    // Keep headers in sync if the user ever opened the sheet and edits them
+    const lastCol = Math.max(sheet.getLastColumn(), 1);
+    const current = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+    if (current.join('|') !== headers.join('|')) {
+      sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+      sheet.getRange(1, 1, 1, headers.length)
+        .setFontWeight('bold').setBackground('#d93025').setFontColor('#ffffff');
+      sheet.setFrozenRows(1);
+    }
+  }
+
+  // Preserve text format on email/phone columns
+  sheet.getRange(1, COL.EMAIL + 1, sheet.getMaxRows(), 1).setNumberFormat('@');
+  sheet.getRange(1, COL.PHONE + 1, sheet.getMaxRows(), 1).setNumberFormat('@');
+
+  return sheet;
+}
+
+// Classify a row as junk. Returns a short reason string if junk, or null.
+// Criteria (any one matches):
+//   - No valid email address
+//   - Status is any "Skipped: ..." string (auto-skip from doPost or send path)
+//   - Status is BOUNCED_STATUS
+//   - Any note in column U+ contains a REJECTION_NOTE_RE keyword
+// Intentionally does NOT flag: New / Queued / Sending / Sent / Replied /
+// Error — those are active or valuable leads.
+function isJunkRow(row) {
+  const status = String(row[COL.STATUS] || '').trim();
+  const email  = String(row[COL.EMAIL]  || '').trim();
+
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return 'no email';
+  if (status === BOUNCED_STATUS) return 'bounced';
+  if (status.indexOf('Skipped:') === 0) return status; // e.g. "Skipped: on-site"
+
+  for (let i = COL.JAYDIP_NOTE; i < row.length; i++) {
+    const note = String(row[i] || '');
+    if (note && REJECTION_NOTE_RE.test(note)) return 'rejected (note)';
+  }
+  return null;
+}
+
+// Move one row from any source sheet to the Recyclebin. Appends "Moved to
+// Bin At" timestamp at the end. Append-then-delete order protects against
+// losing data if deleteRow throws partway through.
+function moveRowToRecyclebin(sourceSheet, rowNumber, reason) {
+  if (!sourceSheet || !rowNumber || rowNumber < 2) return false;
+  const recycle = getOrCreateRecyclebinSheet();
+
+  const fullCols = Math.max(sourceSheet.getLastColumn(), HEADERS.length);
+  const rowData = sourceSheet.getRange(rowNumber, 1, 1, fullCols).getValues()[0];
+
+  // Pad / trim to exactly HEADERS.length then append timestamp
+  while (rowData.length < HEADERS.length) rowData.push('');
+  if (rowData.length > HEADERS.length) rowData.length = HEADERS.length;
+  rowData.push(new Date());
+
+  recycle.appendRow(rowData);
+  sourceSheet.deleteRow(rowNumber);
+
+  try {
+    SpreadsheetApp.getActive().toast(
+      (reason ? '🗑 ' + reason + ' → ' : '🗑 ') + 'moved to Recyclebin (row ' + rowNumber + ').',
+      'Auto-cleaned', 4
+    );
+  } catch (_) {}
+  return true;
+}
+
+// Bulk cleanup — walks the main LinkedIn sheet, moves every junk row to
+// Recyclebin. One confirmation dialog + one bulk setValues for speed.
+function sweepToRecyclebin() {
+  const ui = SpreadsheetApp.getUi();
+  const ss = SpreadsheetApp.getActive();
+  const source = ss.getSheetByName(SHEET_NAME);
+  if (!source) {
+    ui.alert('Sheet "' + SHEET_NAME + '" not found.');
+    return;
+  }
+
+  const lastRow = source.getLastRow();
+  if (lastRow < 2) {
+    ui.alert('LinkedIn sheet is empty — nothing to clean.');
+    return;
+  }
+
+  const fullCols = Math.max(source.getLastColumn(), HEADERS.length);
+  const data = source.getRange(2, 1, lastRow - 1, fullCols).getValues();
+
+  const junk = []; // { rowNumber, reason, rowData }
+  const stats = { noEmail: 0, bounced: 0, skipped: 0, rejected: 0 };
+  for (let i = 0; i < data.length; i++) {
+    const reason = isJunkRow(data[i]);
+    if (!reason) continue;
+    junk.push({ rowNumber: i + 2, reason: reason, rowData: data[i] });
+    if (reason === 'no email')            stats.noEmail++;
+    else if (reason === 'bounced')        stats.bounced++;
+    else if (reason === 'rejected (note)') stats.rejected++;
+    else                                   stats.skipped++;
+  }
+
+  if (!junk.length) {
+    ui.alert('✅ LinkedIn sheet is already clean — no junk rows to move.');
+    return;
+  }
+
+  const summaryParts = [];
+  if (stats.noEmail)  summaryParts.push(stats.noEmail + ' with no email');
+  if (stats.bounced)  summaryParts.push(stats.bounced + ' bounced');
+  if (stats.skipped)  summaryParts.push(stats.skipped + ' auto-skipped');
+  if (stats.rejected) summaryParts.push(stats.rejected + ' rejected (note)');
+
+  const resp = ui.alert(
+    '🗑 Move ' + junk.length + ' junk rows to Recyclebin?',
+    'Breakdown: ' + summaryParts.join(', ') + '\n\n' +
+    'These rows will leave the LinkedIn sheet and land in the Recyclebin tab ' +
+    '(same columns + a "Moved to Bin At" timestamp). Future scans of the ' +
+    'same leads will be caught as duplicates from either sheet.\n\n' +
+    'Click OK to move, Cancel to keep them in place.',
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (resp !== ui.Button.OK) return;
+
+  // Build the rows we'll append to Recyclebin (pad to full header width + timestamp)
+  const recycle = getOrCreateRecyclebinSheet();
+  const now = new Date();
+  const rowsToAppend = junk.map(function (j) {
+    const r = j.rowData.slice();
+    while (r.length < HEADERS.length) r.push('');
+    if (r.length > HEADERS.length) r.length = HEADERS.length;
+    r.push(now);
+    return r;
+  });
+
+  // Single bulk write to Recyclebin
+  const startRow = recycle.getLastRow() + 1;
+  recycle.getRange(startRow, 1, rowsToAppend.length, rowsToAppend[0].length)
+    .setValues(rowsToAppend);
+
+  // Delete from source — bottom-up so row indexes stay valid
+  junk.sort(function (a, b) { return b.rowNumber - a.rowNumber; });
+  for (let i = 0; i < junk.length; i++) {
+    source.deleteRow(junk[i].rowNumber);
+  }
+
+  ss.toast('🗑 Moved ' + junk.length + ' junk rows to Recyclebin.', '✅ Cleaned', 8);
+}
+
+// Danger — empties the entire Recyclebin sheet (keeps headers). Menu-only.
+function emptyRecyclebin() {
+  const ui = SpreadsheetApp.getUi();
+  const ss = SpreadsheetApp.getActive();
+  const bin = ss.getSheetByName(RECYCLEBIN_SHEET_NAME);
+  if (!bin) {
+    ui.alert('Recyclebin sheet doesn\'t exist yet.');
+    return;
+  }
+  const lastRow = bin.getLastRow();
+  if (lastRow < 2) {
+    ui.alert('Recyclebin is already empty.');
+    return;
+  }
+  const resp = ui.alert(
+    '⚠ Empty Recyclebin?',
+    'This will permanently delete ' + (lastRow - 1) + ' row(s) from the ' +
+    'Recyclebin tab. The data cannot be recovered.\n\nContinue?',
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (resp !== ui.Button.OK) return;
+  bin.getRange(2, 1, lastRow - 1, bin.getLastColumn()).clearContent();
+  ss.toast('Recyclebin emptied (' + (lastRow - 1) + ' rows deleted).', '✅ Done', 5);
+}
+
+// ============================================================
 // SEND EMAIL — onEdit handler
 // ============================================================
 
@@ -496,36 +755,52 @@ function onEditInstallable(e) {
     if (!e || !e.range) return;
     const range = e.range;
     const sheet = range.getSheet();
-    // Send checkbox fires only from the main LinkedIn sheet. Dashboard /
-    // B2B Leads / any other tab — ignore.
+    // Only act on the main LinkedIn sheet. Dashboard / Recyclebin / etc.
+    // edits are ignored.
     if (sheet.getName() !== SHEET_NAME) return;
-    if (range.getColumn() !== COL.SEND + 1) return;
 
+    const col = range.getColumn();
     const rowNumber = range.getRow();
     if (rowNumber === 1) return;
 
-    const statusCell = sheet.getRange(rowNumber, COL.STATUS + 1);
-    const currentStatus = String(statusCell.getValue() || '').trim();
-    const alreadySent = (currentStatus === SENT_STATUS);
+    // ── (1) Send checkbox edits — col A ──
+    if (col === COL.SEND + 1) {
+      const statusCell = sheet.getRange(rowNumber, COL.STATUS + 1);
+      const currentStatus = String(statusCell.getValue() || '').trim();
+      const alreadySent = (currentStatus === SENT_STATUS);
 
-    // ── LOCK: if this row is already Sent, force checkbox to stay TRUE. ──
-    //    No matter what the user does, it cannot be re-sent.
-    if (alreadySent) {
-      if (e.value !== 'TRUE') {
-        range.setValue(true);
-        SpreadsheetApp.getActive().toast(
-          'This row has already been sent. Checkbox is locked.',
-          '🔒 Locked',
-          4
-        );
+      // LOCK: if this row is already Sent, force checkbox to stay TRUE.
+      // No matter what the user does, it cannot be re-sent.
+      if (alreadySent) {
+        if (e.value !== 'TRUE') {
+          range.setValue(true);
+          SpreadsheetApp.getActive().toast(
+            'This row has already been sent. Checkbox is locked.',
+            '🔒 Locked',
+            4
+          );
+        }
+        return;
       }
+
+      // Not yet sent — only fire on an actual tick (ignore unticks)
+      if (e.value !== 'TRUE') return;
+      handleSendCheckbox(sheet, rowNumber);
       return;
     }
 
-    // Not yet sent — only fire on an actual tick (ignore unticks)
-    if (e.value !== 'TRUE') return;
-
-    handleSendCheckbox(sheet, rowNumber);
+    // ── (2) User-note edit on column U or later — auto-move to Recyclebin ──
+    // If Jaydip types "rejected" / "not interested" / "declined" / etc. in
+    // any note column, this row is a dead lead and gets swept out of the
+    // live sheet so it stops cluttering the view + dashboard. The cross-
+    // sheet dedup in doPost prevents it from re-entering on next scan.
+    if (col >= COL.JAYDIP_NOTE + 1) {
+      const noteValue = String(range.getValue() || '');
+      if (noteValue && REJECTION_NOTE_RE.test(noteValue)) {
+        moveRowToRecyclebin(sheet, rowNumber, 'rejected (note)');
+      }
+      return;
+    }
   } catch (err) {
     SpreadsheetApp.getActive().toast('Error: ' + err.message, '❌ Pradip AI', 10);
   }
@@ -1655,19 +1930,28 @@ function checkBounces() {
     if (!bouncedEmails.has(rowEmail)) continue;
     if (status === BOUNCED_STATUS) continue; // already marked
 
-    const rowNumber = i + 2;
+    matchedRows.push({ sheetRow: i + 2, email: rowEmail });
+  }
+
+  // Mark Bounced + move to Recyclebin. Iterate bottom-up so row indices
+  // stay valid as we delete earlier matches.
+  matchedRows.sort(function (a, b) { return b.sheetRow - a.sheetRow; });
+  for (let j = 0; j < matchedRows.length; j++) {
+    const rowNumber = matchedRows[j].sheetRow;
     sheet.getRange(rowNumber, COL.STATUS + 1).setValue(BOUNCED_STATUS);
-    matchedRows.push({ row: rowNumber, email: rowEmail });
+    // Move to Recyclebin right away — no point keeping bounced rows in the
+    // live view. moveRowToRecyclebin appends-then-deletes atomically.
+    moveRowToRecyclebin(sheet, rowNumber, 'bounced');
   }
 
   ui.alert(
     '🔍 Bounce scan complete.\n\n' +
     'Bounce messages scanned: ' + threads.length + '\n' +
     'Unique bounced addresses: ' + bouncedEmails.size + '\n' +
-    'Sheet rows marked Bounced: ' + matchedRows.length + '\n\n' +
+    'Rows moved to Recyclebin: ' + matchedRows.length + '\n\n' +
     (matchedRows.length
-      ? 'Affected rows:\n' + matchedRows.slice(0, 10).map(function (m) {
-          return '  Row ' + m.row + ' — ' + m.email;
+      ? 'Affected addresses:\n' + matchedRows.slice(0, 10).map(function (m) {
+          return '  ' + m.email;
         }).join('\n') + (matchedRows.length > 10 ? '\n  …and ' + (matchedRows.length - 10) + ' more' : '')
       : 'None of the bounced addresses are in your sheet.')
   );
@@ -1953,6 +2237,9 @@ function onOpen() {
     .addSeparator()
     .addItem('📨 Check replies', 'checkReplies')
     .addItem('🔍 Check bounced emails', 'checkBounces')
+    .addSeparator()
+    .addItem('🗑 Sweep junk → Recyclebin', 'sweepToRecyclebin')
+    .addItem('♻ Empty Recyclebin', 'emptyRecyclebin')
     .addSeparator()
     .addItem('📊 Refresh dashboard', 'buildDashboard')
     .addItem('Rebuild headers + checkboxes', 'rebuildSheet')
