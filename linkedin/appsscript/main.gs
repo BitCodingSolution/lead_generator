@@ -984,12 +984,16 @@ function stopQueue() {
 
   deleteBatchTrigger();
 
-  // Reset any rows that were still Queued/Sending back to 'New'
+  // Reset any rows that were still Queued/Sending back to 'New'.
+  // Queue entries are {r: rowNumber, k: 'send' | 'followup'} objects —
+  // unpack the row number before touching the sheet.
   const sheet = SpreadsheetApp.getActive().getSheetByName(SHEET_NAME);
   if (sheet) {
     const state = loadQueueState();
     if (state.queue && state.queue.length) {
-      state.queue.forEach(function (rowNumber) {
+      state.queue.forEach(function (entry) {
+        const rowNumber = (typeof entry === 'object' && entry) ? entry.r : entry;
+        if (!rowNumber) return;
         const statusCell = sheet.getRange(rowNumber, COL.STATUS + 1);
         const cur = String(statusCell.getValue() || '').trim();
         if (cur === QUEUED_STATUS || cur === SENDING_STATUS) {
@@ -1451,6 +1455,7 @@ function sidebarStopQueue() {
     if (state.queue && state.queue.length) {
       state.queue.forEach(function (entry) {
         const rowNumber = (typeof entry === 'object' && entry) ? entry.r : entry;
+        if (!rowNumber) return;
         const statusCell = sheet.getRange(rowNumber, COL.STATUS + 1);
         const cur = String(statusCell.getValue() || '').trim();
         if (cur === QUEUED_STATUS || cur === SENDING_STATUS) {
