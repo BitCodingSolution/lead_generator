@@ -1,8 +1,24 @@
 // ============================================================
 // Pradip AI — Lead Tracker + Direct Email Sender
 //
-// CURRENT VERSION: v3.16
+// CURRENT VERSION: v3.17
 //
+// v3.17 changes:
+//   • stopQueue + sidebarStopQueue now tolerate the script.scriptapp
+//     OAuth scope being unauthorized in the current session. Previously,
+//     clicking Stop threw "You do not have permission to call
+//     ScriptApp.getProjectTriggers" and left state + trigger both
+//     untouched. Now: isBatchRunning() + deleteBatchTrigger() are both
+//     try/catch-guarded, state is cleared, queued rows reset to New, and
+//     the trigger self-terminates on the next tick (processQueue sees an
+//     empty queue → deleteBatchTrigger + clearQueueState).
+//   • resetQueuedRowsFromState_() — dedup'd the "reset state.queue rows
+//     back to New" block that stopQueue and sidebarStopQueue both had.
+//   • New menu action "♻ Reset orphan Queued rows" (resetOrphanQueued)
+//     — one-shot cleanup for rows stuck at Queued/Sending because a
+//     previous batch was interrupted (Apps Script 6-min timeout, tab
+//     closed mid-run, script error). Only touches rows NOT tracked in
+//     the currently-active state.queue, so an in-flight batch is safe.
 // v3.16 changes:
 //   • RECYCLEBIN TAB — dead leads are automatically moved out of the
 //     main LinkedIn sheet into a "Recyclebin" tab so the active view
@@ -1249,37 +1265,55 @@ function sendAllPending() {
 
 /**
  * Menu handler: stop the batch queue immediately.
+ *
+ * Scope note: ScriptApp.getProjectTriggers/deleteTrigger need the
+ * script.scriptapp scope. If the user's current auth context lacks it
+ * (common when the sidebar or a re-deployed Apps Script hasn't been
+ * reauthorized), we still want Stop to clear state + reset rows. The
+ * next processQueue tick will then see an empty queue and self-delete
+ * its own trigger (see processQueue line ~1314). Worst case: one more
+ * email sends before the queue self-terminates.
  */
 function stopQueue() {
   const ui = SpreadsheetApp.getUi();
-  if (!isBatchRunning()) {
+  let running;
+  try {
+    running = isBatchRunning();
+  } catch (e) {
+    const state = loadQueueState();
+    running = !!(state.queue && state.queue.length);
+  }
+  if (!running) {
     ui.alert('No batch queue is currently running.');
     return;
   }
 
-  deleteBatchTrigger();
+  try { deleteBatchTrigger(); } catch (e) { /* scope-denied — self-terminates next tick */ }
 
-  // Reset any rows that were still Queued/Sending back to 'New'.
-  // Queue entries are {r: rowNumber, k: 'send' | 'followup'} objects —
-  // unpack the row number before touching the sheet.
-  const sheet = SpreadsheetApp.getActive().getSheetByName(SHEET_NAME);
-  if (sheet) {
-    const state = loadQueueState();
-    if (state.queue && state.queue.length) {
-      state.queue.forEach(function (entry) {
-        const rowNumber = (typeof entry === 'object' && entry) ? entry.r : entry;
-        if (!rowNumber) return;
-        const statusCell = sheet.getRange(rowNumber, COL.STATUS + 1);
-        const cur = String(statusCell.getValue() || '').trim();
-        if (cur === QUEUED_STATUS || cur === SENDING_STATUS) {
-          statusCell.setValue('New');
-        }
-      });
-    }
-  }
-
+  resetQueuedRowsFromState_();
   clearQueueState();
   SpreadsheetApp.getActive().toast('Batch queue stopped.', '⏹ Stopped', 5);
+}
+
+/**
+ * Reset rows currently tracked in state.queue back to 'New'.
+ * Shared by stopQueue + sidebarStopQueue. Queue entries are
+ * {r: rowNumber, k: 'send' | 'followup'} objects — unpack entry.r.
+ */
+function resetQueuedRowsFromState_() {
+  const sheet = SpreadsheetApp.getActive().getSheetByName(SHEET_NAME);
+  if (!sheet) return;
+  const state = loadQueueState();
+  if (!state.queue || !state.queue.length) return;
+  state.queue.forEach(function (entry) {
+    const rowNumber = (typeof entry === 'object' && entry) ? entry.r : entry;
+    if (!rowNumber) return;
+    const statusCell = sheet.getRange(rowNumber, COL.STATUS + 1);
+    const cur = String(statusCell.getValue() || '').trim();
+    if (cur === QUEUED_STATUS || cur === SENDING_STATUS) {
+      statusCell.setValue('New');
+    }
+  });
 }
 
 /**
@@ -1719,29 +1753,72 @@ function showQueueStatusSidebar() {
  * still be open after the batch completed).
  */
 function sidebarStopQueue() {
-  if (!isBatchRunning()) {
+  let running;
+  try {
+    running = isBatchRunning();
+  } catch (e) {
+    const state = loadQueueState();
+    running = !!(state.queue && state.queue.length);
+  }
+  if (!running) {
     return { ok: false, message: 'No queue running.' };
   }
-  // Inlined version of stopQueue() WITHOUT the ui.alert (sidebar handles UI)
-  deleteBatchTrigger();
-  const sheet = SpreadsheetApp.getActive().getSheetByName(SHEET_NAME);
-  if (sheet) {
-    const state = loadQueueState();
-    if (state.queue && state.queue.length) {
-      state.queue.forEach(function (entry) {
-        const rowNumber = (typeof entry === 'object' && entry) ? entry.r : entry;
-        if (!rowNumber) return;
-        const statusCell = sheet.getRange(rowNumber, COL.STATUS + 1);
-        const cur = String(statusCell.getValue() || '').trim();
-        if (cur === QUEUED_STATUS || cur === SENDING_STATUS) {
-          statusCell.setValue('New');
-        }
-      });
-    }
-  }
+  try { deleteBatchTrigger(); } catch (e) { /* scope-denied — self-terminates next tick */ }
+  resetQueuedRowsFromState_();
   clearQueueState();
   SpreadsheetApp.getActive().toast('Batch queue stopped from sidebar.', '⏹ Stopped', 5);
   return { ok: true };
+}
+
+/**
+ * Menu handler: one-shot cleanup for rows stuck at 'Queued'/'Sending' due
+ * to a crashed/interrupted batch (Apps Script 6-min timeout, tab close mid
+ * run, etc.). Only resets rows that are NOT in the currently-active
+ * state.queue, so an in-flight batch keeps its own rows.
+ */
+function resetOrphanQueued() {
+  // Works from menu (has UI) AND from the Apps Script editor Run button
+  // (no UI — getUi throws). When there's no UI, log + toast instead.
+  let ui = null;
+  try { ui = SpreadsheetApp.getUi(); } catch (_) { ui = null; }
+  const notify = function (msg) {
+    console.log(msg);
+    if (ui) ui.alert(msg);
+    else {
+      try { SpreadsheetApp.getActive().toast(msg, '♻ Orphan reset', 8); } catch (_) {}
+    }
+  };
+
+  const sheet = SpreadsheetApp.getActive().getSheetByName(SHEET_NAME);
+  if (!sheet) { notify('LinkedIn sheet not found.'); return; }
+
+  const state = loadQueueState();
+  const activeRows = new Set();
+  (state.queue || []).forEach(function (entry) {
+    const r = (typeof entry === 'object' && entry) ? entry.r : entry;
+    if (r) activeRows.add(r);
+  });
+
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) { notify('Sheet is empty.'); return; }
+
+  const range = sheet.getRange(2, COL.STATUS + 1, lastRow - 1, 1);
+  const values = range.getValues();
+  let resetCount = 0;
+  for (let i = 0; i < values.length; i++) {
+    const cur = String(values[i][0] || '').trim();
+    const rowNum = i + 2;
+    if ((cur === QUEUED_STATUS || cur === SENDING_STATUS) && !activeRows.has(rowNum)) {
+      values[i][0] = 'New';
+      resetCount++;
+    }
+  }
+  if (resetCount > 0) range.setValues(values);
+
+  const activeMsg = activeRows.size
+    ? ' (left ' + activeRows.size + ' rows in the running batch untouched)'
+    : '';
+  notify('♻ Reset ' + resetCount + ' orphan row(s) back to New' + activeMsg + '.');
 }
 
 // ============================================================
@@ -2234,6 +2311,7 @@ function onOpen() {
     .addItem('📮 Send follow-ups (3+ days no reply)', 'sendAllFollowups')
     .addItem('📊 Queue status (live sidebar)', 'showQueueStatusSidebar')
     .addItem('⏹ Stop batch queue', 'stopQueue')
+    .addItem('♻ Reset orphan Queued rows', 'resetOrphanQueued')
     .addSeparator()
     .addItem('📨 Check replies', 'checkReplies')
     .addItem('🔍 Check bounced emails', 'checkBounces')
