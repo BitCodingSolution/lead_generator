@@ -718,8 +718,69 @@ function buildExtractSystemPrompt() {
     `  "notes":         "1 short sentence summary",\n` +
     `  "email_mode":    "individual OR company — see classification rules",\n` +
     `  "email_subject": "subject matching chosen mode",\n` +
-    `  "email_body":    "body matching chosen mode"\n` +
+    `  "email_body":    "body matching chosen mode",\n` +
+    `  "should_skip":   "true/false — set true ONLY when this post is fundamentally unfit for Jaydip (see strict rules below). Default false.",\n` +
+    `  "skip_reason":   "short phrase (2-6 words) describing why — e.g. 'not a job post', 'onsite only', 'full-time only no contract', 'W2 only', 'internship', 'tech mismatch'. Empty string when should_skip is false."\n` +
     `}\n\n` +
+
+    `================================================================\n` +
+    `STEP 0 — SHOULD_SKIP DECISION (do this FIRST, it gates everything)\n` +
+    `================================================================\n\n` +
+
+    `Jaydip is a solo senior Python / AI-ML contractor (also runs BitCoding). ` +
+    `He needs REMOTE CONTRACT work. Your job is to decide whether outreach on ` +
+    `this post would be a waste of his time.\n\n` +
+
+    `DEFAULT: should_skip = false. When in doubt, DO NOT skip. Jaydip would ` +
+    `rather review a borderline post himself than have a real lead thrown away.\n\n` +
+
+    `Set should_skip = TRUE only when ONE of these is CLEARLY true:\n\n` +
+
+    `  A) NOT A JOB POST. The post is a candidate "open to work" / referral ` +
+    `     ask / visa-seeker / networking / congrats / generic motivational ` +
+    `     post. No employer is hiring here.\n` +
+    `     skip_reason: "not a job post"\n\n` +
+
+    `  B) STRICTLY ONSITE. Post explicitly says onsite-only / in-office only / ` +
+    `     "must relocate" AND makes NO mention of remote, hybrid, or work-from-home ` +
+    `     as an option. If the post mentions "hybrid" or "remote optional" or ` +
+    `     "flexible" → NOT a skip, Jaydip can negotiate.\n` +
+    `     skip_reason: "onsite only"\n\n` +
+
+    `  C) FULL-TIME ONLY, NO CONTRACT. Post explicitly rules out contract / ` +
+    `     freelance / C2C — e.g. "full-time employees only, no contractors", ` +
+    `     "permanent position only, no C2C". If the post mentions full-time ` +
+    `     AS ONE OPTION among others (contract / freelance / C2C also listed, ` +
+    `     even as "open to") → NOT a skip.\n` +
+    `     skip_reason: "full-time only no contract"\n\n` +
+
+    `  D) W2-ONLY RECRUITER. Post explicitly says "W2 only" / "W2 candidates ` +
+    `     only" / "no C2C". Jaydip is India-based so W2 is impossible.\n` +
+    `     skip_reason: "W2 only"\n\n` +
+
+    `  E) INTERNSHIP / JUNIOR / UNPAID. Post is for an intern, unpaid role, ` +
+    `     or fresher (0-2 yrs). Jaydip is 8+ yrs, huge mismatch.\n` +
+    `     skip_reason: "internship" or "too junior"\n\n` +
+
+    `  F) HARD LOCATION LOCK. Post requires physical presence in a specific ` +
+    `     country/city AND explicitly rules out remote (e.g. "must be based in ` +
+    `     US, no remote", "local candidates only in Berlin, no remote"). ` +
+    `     Silence on remote → NOT a skip.\n` +
+    `     skip_reason: "location locked"\n\n` +
+
+    `  G) FUNDAMENTAL TECH MISMATCH. Role is clearly in a stack Jaydip does ` +
+    `     NOT work with AND there's no Python/AI/ML/automation/scraping/RAG ` +
+    `     overlap at all — e.g. pure Salesforce admin, .NET/C# only, pure ` +
+    `     mainframe COBOL, pure SAP FICO. Python + anything-else is NOT a skip.\n` +
+    `     skip_reason: "tech mismatch"\n\n` +
+
+    `NEGATION-AWARE: If you see a phrase like "full-time" or "onsite" in the ` +
+    `post, READ THE SURROUNDING CONTEXT. "Not looking for full-time only ` +
+    `candidates" or "no onsite required" means the opposite — DON'T skip.\n\n` +
+
+    `If should_skip is true, still fill in all extraction fields (company, role, ` +
+    `etc.) normally. Also still produce a non-empty email_subject and email_body ` +
+    `— Jaydip may manually override the skip later.\n\n` +
 
     `================================================================\n` +
     `STEP 1 — CLASSIFY email_mode (this is the most important step)\n` +

@@ -1,8 +1,18 @@
 // ============================================================
 // Pradip AI — Lead Tracker + Direct Email Sender
 //
-// CURRENT VERSION: v3.17
+// CURRENT VERSION: v3.18
 //
+// v3.18 changes:
+//   • Auto-skip decision moved from regex blocklist to Claude. The extract
+//     prompt now asks Claude to set should_skip + skip_reason based on
+//     contextual reading of the post (negation-aware, handles
+//     "full-time OR contract" posts correctly, etc.). doPost respects
+//     Claude's decision as PRIMARY. The phrase-blocklist +
+//     hasJobPostSignal check now only fire as a fallback when Claude
+//     didn't decide (older extension / missing field), since they were
+//     too prone to false positives. autoSkipSource field in the response
+//     flags whether Claude or the regex fallback made the call.
 // v3.17 changes:
 //   • stopQueue + sidebarStopQueue now tolerate the script.scriptapp
 //     OAuth scope being unauthorized in the current session. Previously,
@@ -403,24 +413,39 @@ function doPost(e) {
       ? 'company'
       : 'individual';
 
-    // Auto-skip decision — TWO gates:
-    //   (a) Blocked phrase match → "Skipped: <phrase>"
-    //   (b) No job-post signal at all (likely not a real hiring post —
-    //       could be networking / visa-seeker / congratulations) →
-    //       "Skipped: not a job post"
-    // Only applied when caller didn't pass an explicit override status.
+    // Auto-skip decision — PRIMARY is Claude's contextual call
+    // (should_skip + skip_reason in the payload, set by the extract prompt).
+    // Regex-based phrase/signal blocklist is now a FALLBACK, only used when
+    // Claude didn't decide (older extension, missing field) — it's too
+    // prone to false positives on phrases like "full-time" inside posts
+    // that also offer contract, or "onsite" that are actually hybrid.
     const defaultStatus = payload.status || 'New';
+    let claudeSkip = false;
+    let claudeSkipReason = '';
     let blockedPhrase = null;
     let notJobPost = false;
     if (defaultStatus === 'New') {
-      blockedPhrase = findBlockedPhraseInPayload_(payload);
-      if (!blockedPhrase) {
-        notJobPost = !hasJobPostSignalInPayload_(payload);
+      const rawSkip = payload.should_skip;
+      claudeSkip = (rawSkip === true || rawSkip === 'true');
+      claudeSkipReason = String(payload.skip_reason || '').trim();
+
+      // Only run the phrase-blocklist fallback when Claude didn't decide
+      // at all (should_skip is undefined). If Claude returned
+      // should_skip=false, trust it — the whole point of moving to Claude
+      // is to stop regex false positives.
+      const claudeDecided = (typeof rawSkip !== 'undefined');
+      if (!claudeDecided) {
+        blockedPhrase = findBlockedPhraseInPayload_(payload);
+        if (!blockedPhrase) {
+          notJobPost = !hasJobPostSignalInPayload_(payload);
+        }
       }
     }
-    const effectiveStatus = blockedPhrase
-      ? ('Skipped: ' + blockedPhrase)
-      : (notJobPost ? 'Skipped: not a job post' : defaultStatus);
+    const effectiveStatus = claudeSkip
+      ? ('Skipped: ' + (claudeSkipReason || 'claude rejected'))
+      : blockedPhrase
+        ? ('Skipped: ' + blockedPhrase)
+        : (notJobPost ? 'Skipped: not a job post' : defaultStatus);
 
     const rowData = [
       false,                                                        // A 📧 Send
@@ -479,11 +504,16 @@ function doPost(e) {
       sheet: routeToBin ? RECYCLEBIN_SHEET_NAME : SHEET_NAME,
       routedToBin: routeToBin,
       binReason: routeToBin
-        ? (!validEmail ? 'no email' : ('skipped — ' + (blockedPhrase || 'not a job post')))
+        ? (!validEmail
+            ? 'no email'
+            : ('skipped — ' + (claudeSkipReason || blockedPhrase || (notJobPost ? 'not a job post' : 'unknown'))))
         : null,
       forced: force,
-      autoSkipped: !!(blockedPhrase || notJobPost),
-      autoSkipReason: blockedPhrase || (notJobPost ? 'not a job post' : null)
+      autoSkipped: !!(claudeSkip || blockedPhrase || notJobPost),
+      autoSkipReason: claudeSkip
+        ? (claudeSkipReason || 'claude rejected')
+        : (blockedPhrase || (notJobPost ? 'not a job post' : null)),
+      autoSkipSource: claudeSkip ? 'claude' : ((blockedPhrase || notJobPost) ? 'regex-fallback' : null)
     });
   } catch (err) {
     return jsonOut({ ok: false, error: String(err) });

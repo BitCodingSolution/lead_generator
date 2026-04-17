@@ -1187,6 +1187,11 @@ function scanBuildPayload(lead, genFields) {
     email_mode:    genFields.email_mode    || "individual",
     email_subject: genFields.email_subject || "",
     email_body:    genFields.email_body    || "",
+    // Claude's skip decision — Apps Script doPost trusts this over the
+    // phrase-blocklist fallback. Normalize string "true"/"false" just in
+    // case Claude serialized the bool as a string.
+    should_skip:   genFields.should_skip === true || genFields.should_skip === "true",
+    skip_reason:   String(genFields.skip_reason || "").trim(),
   };
 }
 
