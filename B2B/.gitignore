@@ -1,0 +1,46 @@
+# --- Data / PII (never commit) ---
+Database/
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+*.db.bak
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+env/
+
+# --- Node / Next.js ---
+node_modules/
+.next/
+out/
+build/
+dist/
+.turbo/
+
+# --- Env / secrets ---
+.env
+.env.local
+.env.*.local
+
+# --- Editor / OS ---
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# --- Logs / temp ---
+*.log
+bridge.log
+npm-debug.log*
+
+# --- Misc project ---
+AppsScript/
+*.xlsx.bak
