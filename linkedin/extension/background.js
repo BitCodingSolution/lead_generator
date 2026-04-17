@@ -74,7 +74,77 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       .catch((err) => sendResponse({ ok: false, error: err.message }));
     return true;
   }
+
+  if (msg && msg.type === "GENERATE_POST") {
+    handleGeneratePost(msg.options || {})
+      .then((r) => sendResponse({ ok: true, ...r }))
+      .catch((err) => sendResponse({ ok: false, error: err.message }));
+    return true;
+  }
+
+  if (msg && msg.type === "PASTE_POST_TO_FEED") {
+    handlePastePostToFeed(msg.text)
+      .then((r) => sendResponse({ ok: true, ...r }))
+      .catch((err) => sendResponse({ ok: false, error: err.message }));
+    return true;
+  }
+
+  if (msg && msg.type === "RESCHEDULE_POST_ALARM") {
+    scheduleDailyPostAlarm()
+      .then(() => sendResponse({ ok: true }))
+      .catch((err) => sendResponse({ ok: false, error: err.message }));
+    return true;
+  }
 });
+
+// Daily post-draft alarm. Fires once a day at user-configured hour (default
+// 9 AM local). Generates a draft in the background and surfaces it via a
+// chrome notification so Jaydip can review at his convenience.
+const DAILY_POST_ALARM = "dailyPostDraft";
+const DAILY_POST_DEFAULT_HOUR = 9;
+
+chrome.runtime.onInstalled.addListener(() => {
+  scheduleDailyPostAlarm().catch((e) =>
+    console.warn("scheduleDailyPostAlarm failed:", e.message)
+  );
+});
+chrome.runtime.onStartup.addListener(() => {
+  scheduleDailyPostAlarm().catch(() => {});
+});
+
+if (chrome.alarms) {
+  chrome.alarms.onAlarm.addListener((alarm) => {
+    if (alarm && alarm.name === DAILY_POST_ALARM) {
+      runDailyPostDraft().catch((e) =>
+        console.warn("runDailyPostDraft failed:", e.message)
+      );
+    }
+  });
+}
+
+async function scheduleDailyPostAlarm() {
+  if (!chrome.alarms) return;
+  const { postAutoDraftEnabled, postAutoDraftHour } =
+    await chrome.storage.local.get(["postAutoDraftEnabled", "postAutoDraftHour"]);
+  await chrome.alarms.clear(DAILY_POST_ALARM);
+  if (!postAutoDraftEnabled) return;
+
+  const hour = Number.isFinite(Number(postAutoDraftHour))
+    ? Math.max(0, Math.min(23, Math.floor(Number(postAutoDraftHour))))
+    : DAILY_POST_DEFAULT_HOUR;
+
+  // Fire once per day at the chosen hour. Compute the next occurrence so
+  // we don't wait up to 24h after install.
+  const now = new Date();
+  const next = new Date();
+  next.setHours(hour, 0, 0, 0);
+  if (next.getTime() <= now.getTime()) next.setDate(next.getDate() + 1);
+
+  chrome.alarms.create(DAILY_POST_ALARM, {
+    when: next.getTime(),
+    periodInMinutes: 60 * 24,
+  });
+}
 
 // ============================================================
 // SAFETY STATE
@@ -1168,6 +1238,277 @@ async function callBridgeRaw(bridgeUrl, systemPrompt, userMessage) {
   const reply = (data && data.reply) || "";
   if (!reply.trim()) throw new Error("Bridge returned empty reply.");
   return reply.trim();
+}
+
+// ============================================================
+// POST DRAFT GENERATION (Jaydip's own LinkedIn content)
+// ============================================================
+
+// Themes that rotate week-to-week so Jaydip doesn't post the same angle twice.
+// Labels are the canonical identifier stored in the draft + recent-themes log;
+// the string under each is the instruction Claude receives.
+const POST_THEMES = {
+  recent_project:   "Share a recent technical problem you solved (generic — no client names). Hook with the pain, then the fix.",
+  tech_tip:         "Share one non-obvious tip about Python / AI-ML / multi-agent / RAG tooling that a senior dev would find useful.",
+  hiring_signal:    "Announce that you're open to new contracts. Low-key, confident, specific tech.",
+  industry_insight: "Take a current trend (agents, RAG limits, LLM ops, small models) and give a short opinion — 1-2 claims, no waffle.",
+  case_study:       "Brief before/after — a capability you added for a client (generic framing, no names). Lead with the metric or concrete outcome.",
+  hot_take:         "One contrarian opinion about AI/Python/tooling. Must be defensible, not edgelord. End with an invitation to disagree.",
+  question:         "Ask the audience one specific technical question. Not rhetorical — something you actually want answers to.",
+};
+
+const POST_LENGTH_SPECS = {
+  short:  { label: "short",  minChars: 200, maxChars: 500,  guidance: "Tight, punchy. One idea, one paragraph. No filler." },
+  medium: { label: "medium", minChars: 600, maxChars: 1100, guidance: "One clear hook line, 2-3 paragraphs, one takeaway. LinkedIn's sweet spot." },
+  long:   { label: "long",   minChars: 1200, maxChars: 2500, guidance: "Hook, 3-5 paragraphs with line breaks between them, concrete details, clear payoff. Read like a mini-essay, not a list." },
+};
+
+const POST_TONE_SPECS = {
+  casual:     "Loose, conversational. Contractions throughout. Like explaining to a smart friend over coffee.",
+  technical:  "Precise, substantive. Drop real names (libraries, patterns, techniques). Assume reader is a senior dev.",
+  storytelling: "Open with a scene or a moment. Walk through what happened. End with the lesson, not a lecture.",
+  "hot-take": "Open with the claim, direct. Back it with 1-2 reasons. Don't hedge.",
+};
+
+async function handleGeneratePost(options) {
+  const length = POST_LENGTH_SPECS[options.length] ? options.length : "medium";
+  const tone = POST_TONE_SPECS[options.tone] ? options.tone : "casual";
+  const recentThemes = Array.isArray(options.recentThemes) ? options.recentThemes : [];
+
+  // Pick a theme Jaydip hasn't posted recently. If every theme was used in
+  // the last 7 posts (unlikely — 7 themes total), fall back to any.
+  const avoidSet = new Set(recentThemes);
+  const themeKeys = Object.keys(POST_THEMES);
+  const available = themeKeys.filter((k) => !avoidSet.has(k));
+  const themePool = available.length ? available : themeKeys;
+  const theme = themePool[Math.floor(Math.random() * themePool.length)];
+
+  const settings = await chrome.storage.local.get([
+    "claudeApiKey",
+    "claudeBackend",
+    "bridgeUrl",
+  ]);
+  const backend = settings.claudeBackend || "bridge";
+
+  const systemPrompt = buildPostSystemPrompt(length, tone, theme);
+  const userPrompt = buildPostUserPrompt(length, tone, theme, recentThemes);
+
+  let raw;
+  if (backend === "bridge") {
+    const bridgeUrl = settings.bridgeUrl || "http://127.0.0.1:8765";
+    raw = await callBridgeRaw(bridgeUrl, systemPrompt, userPrompt);
+  } else {
+    const apiKey = settings.claudeApiKey;
+    if (!apiKey) {
+      throw new Error("Direct API selected but no key set.");
+    }
+    raw = await callClaudeRaw(apiKey, systemPrompt, userPrompt);
+  }
+
+  const parsed = parsePostJson(raw);
+  // Enrich each variant with metadata the UI needs
+  const drafts = parsed.variants.map((v, i) => ({
+    id: cryptoRandomId(),
+    variant: i + 1,
+    text: String(v.text || "").trim(),
+    hook: String(v.hook || "").trim(),
+    hashtags: Array.isArray(v.hashtags) ? v.hashtags : [],
+    theme,
+    tone,
+    length,
+    charCount: String(v.text || "").length,
+    generatedAt: Date.now(),
+    status: "draft", // draft | posted | discarded
+  }));
+
+  return { drafts, theme, tone, length };
+}
+
+function buildPostSystemPrompt(length, tone, theme) {
+  const lenSpec = POST_LENGTH_SPECS[length];
+  const toneSpec = POST_TONE_SPECS[tone];
+  const themeSpec = POST_THEMES[theme];
+
+  return (
+    `You are writing AS Jaydip Nakarani — senior Python / AI-ML developer, 8+ years, ` +
+    `based in Surat India, open to remote contracts. Stack: Python, Django, FastAPI, ` +
+    `LangGraph, OpenAI, Claude, multi-agent systems, RAG, web scraping, automation, NLP, AWS, Docker. ` +
+    `Also co-founder of BitCoding Solutions (mention only when naturally relevant).\n\n` +
+
+    `TASK: Produce THREE distinct LinkedIn post variants for Jaydip on a single topic. ` +
+    `Jaydip will pick the best one (or edit it) and post manually. Variants must be ` +
+    `GENUINELY DIFFERENT — different hooks, different angles — not three rewordings of the same thing.\n\n` +
+
+    `THEME: ${theme} — ${themeSpec}\n\n` +
+    `LENGTH: ${lenSpec.label} (${lenSpec.minChars}-${lenSpec.maxChars} chars each). ${lenSpec.guidance}\n\n` +
+    `TONE: ${tone} — ${toneSpec}\n\n` +
+
+    `HARD RULES (all variants):\n` +
+    `- Plain text only. LinkedIn does NOT render markdown — no **bold**, no *italic*, no \`code\`, no # headings.\n` +
+    `- Line breaks via real newlines (\\n).\n` +
+    `- 0-3 hashtags MAX, at the end, lowercase, relevant and specific (no #motivation, #success).\n` +
+    `- No emojis, or at most ONE functional emoji (→, 🛠, 📌). Never decorative strings of emojis.\n` +
+    `- No em dashes (—). Use regular hyphens or periods.\n` +
+    `- Sound like a real engineer typing on their phone — contractions, natural rhythm. Not AI-polish.\n` +
+    `- NO banned phrases: "excited to share", "thrilled", "journey", "game-changer", "synergy", ` +
+    `"leverage", "revolutionize", "unlock the power", "in today's fast-paced world".\n` +
+    `- Don't open with "I'm excited..." or "Here's a story..." — too templatey. Start with the thing itself.\n` +
+    `- Hook line (first line before the break) must be strong enough to stop the scroll. State the claim / ` +
+    `the scene / the number — don't warm up.\n` +
+    `- Do NOT impersonate specific clients, use real company names, or invent metrics. Keep examples generic.\n\n` +
+
+    `Return ONLY a JSON object (no prose, no code fences, no explanation). Schema:\n` +
+    `{\n` +
+    `  "variants": [\n` +
+    `    { "hook": "first line (<120 chars, the stop-the-scroll line)",\n` +
+    `      "text": "full post body including the hook (plain text, \\n line breaks)",\n` +
+    `      "hashtags": ["tag1", "tag2"] },\n` +
+    `    { ... second variant, distinctly different angle },\n` +
+    `    { ... third variant, distinctly different angle }\n` +
+    `  ]\n` +
+    `}\n\n` +
+
+    `Output the JSON object starting with { and ending with }. Nothing before or after.`
+  );
+}
+
+function buildPostUserPrompt(length, tone, theme, recentThemes) {
+  const recentNote = recentThemes.length
+    ? `\n\nRecently posted themes (avoid re-using these angles): ${recentThemes.join(", ")}.`
+    : "";
+  return (
+    `Generate 3 variants now. Theme=${theme}, length=${length}, tone=${tone}.` +
+    recentNote +
+    `\n\nDo NOT start any variant with "Excited", "Thrilled", "Here's a", "I just", or any AI-template opener. ` +
+    `Start with the actual content — a claim, a scene, a number, a problem.`
+  );
+}
+
+function parsePostJson(raw) {
+  if (!raw) throw new Error("Empty response from Claude.");
+  let s = raw.trim();
+
+  const fence = s.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+  if (fence) s = fence[1].trim();
+
+  const first = s.indexOf("{");
+  const last = s.lastIndexOf("}");
+  if (first !== -1 && last !== -1) s = s.slice(first, last + 1);
+
+  let data;
+  try {
+    data = JSON.parse(s);
+  } catch (err) {
+    throw new Error(
+      `Claude didn't return valid JSON for post draft: ${err.message}. Raw start: ${raw.slice(0, 120)}`
+    );
+  }
+
+  if (!data || !Array.isArray(data.variants) || !data.variants.length) {
+    throw new Error("Post JSON missing 'variants' array.");
+  }
+  return data;
+}
+
+function cryptoRandomId() {
+  // Sufficiently unique for chrome.storage keys; avoids crypto.randomUUID
+  // availability quirks in older Chromium service worker contexts.
+  return (
+    Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 10)
+  );
+}
+
+// Daily alarm handler — generate one default draft and notify Jaydip.
+async function runDailyPostDraft() {
+  const { postDrafts, postRecentThemes, postAutoDraftLength, postAutoDraftTone } =
+    await chrome.storage.local.get([
+      "postDrafts",
+      "postRecentThemes",
+      "postAutoDraftLength",
+      "postAutoDraftTone",
+    ]);
+
+  const recentThemes = Array.isArray(postRecentThemes) ? postRecentThemes : [];
+  const length = postAutoDraftLength || "medium";
+  const tone = postAutoDraftTone || "casual";
+
+  let result;
+  try {
+    result = await handleGeneratePost({ length, tone, recentThemes });
+  } catch (e) {
+    console.warn("[daily-post] generation failed:", e.message);
+    return;
+  }
+
+  // Auto-drafts are tagged so the UI can distinguish them from manual runs.
+  const autoDrafts = (result.drafts || []).map((d) => ({ ...d, source: "auto" }));
+  const existing = Array.isArray(postDrafts) ? postDrafts : [];
+  const merged = [...autoDrafts, ...existing].slice(0, 50); // cap history
+
+  await chrome.storage.local.set({ postDrafts: merged });
+
+  // Surface via system notification (user can click to open the side panel).
+  try {
+    if (chrome.notifications) {
+      chrome.notifications.create("dailyPostDraft-" + Date.now(), {
+        type: "basic",
+        iconUrl: "icons/icon128.png",
+        title: "📝 LinkedIn post drafts ready",
+        message: `3 ${length} ${tone} variants on theme: ${result.theme}. Open the side panel → Posts tab.`,
+        priority: 1,
+      });
+    }
+  } catch (_) {}
+}
+
+// Paste a post draft into LinkedIn's feed composer via the content script
+// on www.linkedin.com/feed/*. The content script returns before the user
+// hits "Post" — review + submit is still manual, so this stays TOS-safe.
+async function handlePastePostToFeed(text) {
+  if (!text || !text.trim()) throw new Error("Empty post text.");
+
+  // Find or open a LinkedIn feed tab
+  let [tab] = await chrome.tabs.query({
+    url: "https://www.linkedin.com/feed/*",
+  });
+  if (!tab) {
+    tab = await chrome.tabs.create({
+      url: "https://www.linkedin.com/feed/",
+      active: true,
+    });
+    // Give the tab a moment to load before we try to inject
+    await sleep(3500);
+  } else {
+    await chrome.tabs.update(tab.id, { active: true });
+    await sleep(300);
+  }
+
+  // Ensure the content script is in place (mirrors ensureContentScript for messaging)
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      files: ["feed-compose.js"],
+    });
+  } catch (e) {
+    console.warn("feed-compose.js inject note:", e.message);
+  }
+
+  // Retry a few times — the LinkedIn feed takes a moment to paint after nav
+  let lastErr;
+  for (let i = 0; i < 4; i++) {
+    try {
+      const resp = await chrome.tabs.sendMessage(tab.id, {
+        type: "PASTE_POST_COMPOSER",
+        text,
+      });
+      if (resp && resp.ok) return { tabId: tab.id };
+      lastErr = new Error((resp && resp.error) || "Paste failed");
+    } catch (err) {
+      lastErr = err;
+    }
+    await sleep(1200 + rand(0, 400));
+  }
+  throw lastErr || new Error("Could not reach the feed composer.");
 }
 
 async function callClaudeRaw(apiKey, systemPrompt, userPrompt) {

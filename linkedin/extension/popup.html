@@ -11,13 +11,14 @@
       <h2>Pradip AI — Lead Tracker</h2>
       <div class="header-right">
         <button id="themeToggleBtn" class="icon-btn" title="Toggle dark mode">☀</button>
-        <span class="version">v0.7</span>
+        <span class="version">v0.8</span>
       </div>
     </header>
 
     <nav class="tabs">
       <button class="tab-btn active" data-tab="bulk">🎯 Bulk</button>
       <button class="tab-btn" data-tab="reply">💬 Reply</button>
+      <button class="tab-btn" data-tab="posts">✍ Posts</button>
       <button class="tab-btn" data-tab="settings">⚙ Settings</button>
     </nav>
 
@@ -149,6 +150,58 @@
         </div>
         <div id="replyPasteStatus" class="status"></div>
       </div>
+    </section>
+
+    <!-- ============ POSTS TAB ============ -->
+    <section class="tab-pane" id="tab-posts">
+      <div class="info-card">
+        <p>
+          ✍ <strong>LinkedIn post drafts.</strong> Generates 3 variants per run.
+          Pick, edit, and click <strong>Open + Paste</strong> — the post opens
+          in LinkedIn's composer ready to review. <em>You click Post yourself.</em>
+        </p>
+      </div>
+
+      <div id="postsBridgeHealth" class="bridge-health bh-unknown">
+        <span class="bh-dot"></span>
+        <span class="bh-text">Checking bridge…</span>
+      </div>
+
+      <div class="posts-controls">
+        <div class="posts-picker-row">
+          <label class="posts-picker-label">Length</label>
+          <div class="posts-chip-group" id="postsLengthGroup">
+            <label class="posts-chip"><input type="radio" name="postsLength" value="short" /><span>Short</span></label>
+            <label class="posts-chip"><input type="radio" name="postsLength" value="medium" checked /><span>Medium</span></label>
+            <label class="posts-chip"><input type="radio" name="postsLength" value="long" /><span>Long</span></label>
+          </div>
+        </div>
+
+        <div class="posts-picker-row">
+          <label class="posts-picker-label">Tone</label>
+          <div class="posts-chip-group" id="postsToneGroup">
+            <label class="posts-chip"><input type="radio" name="postsTone" value="casual" checked /><span>Casual</span></label>
+            <label class="posts-chip"><input type="radio" name="postsTone" value="technical" /><span>Technical</span></label>
+            <label class="posts-chip"><input type="radio" name="postsTone" value="storytelling" /><span>Story</span></label>
+            <label class="posts-chip"><input type="radio" name="postsTone" value="hot-take" /><span>Hot-take</span></label>
+          </div>
+        </div>
+
+        <button id="postsGenerateBtn" class="primary-btn">✨ Generate 3 variants</button>
+      </div>
+
+      <div id="postsStatus" class="status"></div>
+
+      <div class="posts-section-head">
+        <span class="posts-section-title">Drafts</span>
+        <label class="posts-auto-toggle">
+          <input type="checkbox" id="postsAutoDraftToggle" />
+          <span>Daily auto-draft at</span>
+          <input type="number" id="postsAutoDraftHour" min="0" max="23" value="9" />
+          <span>:00</span>
+        </label>
+      </div>
+      <div id="postsDraftsWrap" class="posts-drafts-wrap"></div>
     </section>
 
     <!-- ============ SETTINGS TAB ============ -->

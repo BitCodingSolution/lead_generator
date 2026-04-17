@@ -9,6 +9,7 @@
 
 const bulkBridgeHealth = document.getElementById("bulkBridgeHealth");
 const settingsBridgeHealth = document.getElementById("settingsBridgeHealth");
+const postsBridgeHealth = document.getElementById("postsBridgeHealth");
 
 // Reply tab
 const generateReplyBtn = document.getElementById("generateReplyBtn");
@@ -171,7 +172,7 @@ function updateWarningCard(stats) {
 // --- Bridge health -------------------------------------------
 
 async function refreshBridgeHealth() {
-  const nodes = [bridgeHealth, bulkBridgeHealth, settingsBridgeHealth].filter(Boolean);
+  const nodes = [bridgeHealth, bulkBridgeHealth, settingsBridgeHealth, postsBridgeHealth].filter(Boolean);
   if (!nodes.length) return;
 
   try {
@@ -217,7 +218,7 @@ async function refreshBridgeHealth() {
 }
 
 function setBridgeHealth(state, msg) {
-  [bridgeHealth, bulkBridgeHealth, settingsBridgeHealth].forEach((node) => {
+  [bridgeHealth, bulkBridgeHealth, settingsBridgeHealth, postsBridgeHealth].forEach((node) => {
     if (!node) return;
     node.className = `bridge-health bh-${state}`;
     const textEl = node.querySelector(".bh-text");
@@ -1832,3 +1833,288 @@ if (scanPanel) {
     });
   } catch (_) {}
 }
+
+// ============================================================
+// POSTS TAB — LinkedIn post draft generator + manager
+// ============================================================
+
+const postsGenerateBtn      = document.getElementById("postsGenerateBtn");
+const postsStatus           = document.getElementById("postsStatus");
+const postsDraftsWrap       = document.getElementById("postsDraftsWrap");
+const postsAutoDraftToggle  = document.getElementById("postsAutoDraftToggle");
+const postsAutoDraftHour    = document.getElementById("postsAutoDraftHour");
+
+// Recent-themes log bounds — keep the last 7 so the rotation picks
+// something Jaydip hasn't posted this week.
+const POSTS_RECENT_THEMES_MAX = 7;
+// Cap stored drafts so chrome.storage doesn't bloat (LinkedIn posts rarely
+// benefit from deep history; posted ones are the only ones worth keeping
+// anyway, and we trim to 50 including discarded).
+const POSTS_DRAFTS_MAX = 50;
+
+function getCheckedRadio(name) {
+  const el = document.querySelector('input[name="' + name + '"]:checked');
+  return el ? el.value : null;
+}
+
+function setPostsStatus(text, isError) {
+  if (!postsStatus) return;
+  postsStatus.textContent = text || "";
+  postsStatus.classList.toggle("error", !!isError);
+  postsStatus.classList.remove("loading");
+}
+
+function setPostsStatusLoading(text) {
+  if (!postsStatus) return;
+  postsStatus.textContent = text || "";
+  postsStatus.classList.remove("error");
+  postsStatus.classList.add("loading");
+}
+
+async function loadPostDrafts() {
+  const { postDrafts } = await chrome.storage.local.get(["postDrafts"]);
+  return Array.isArray(postDrafts) ? postDrafts : [];
+}
+
+async function savePostDrafts(drafts) {
+  const trimmed = drafts.slice(0, POSTS_DRAFTS_MAX);
+  await chrome.storage.local.set({ postDrafts: trimmed });
+}
+
+async function loadRecentThemes() {
+  const { postRecentThemes } = await chrome.storage.local.get(["postRecentThemes"]);
+  return Array.isArray(postRecentThemes) ? postRecentThemes : [];
+}
+
+async function pushRecentTheme(theme) {
+  if (!theme) return;
+  const recent = await loadRecentThemes();
+  // Remove any existing entry for this theme and unshift fresh — most
+  // recently-posted theme sits at index 0, oldest drops off at the cap.
+  const filtered = recent.filter((t) => t !== theme);
+  filtered.unshift(theme);
+  await chrome.storage.local.set({
+    postRecentThemes: filtered.slice(0, POSTS_RECENT_THEMES_MAX),
+  });
+}
+
+async function handleGeneratePost() {
+  if (!postsGenerateBtn) return;
+  const length = getCheckedRadio("postsLength") || "medium";
+  const tone = getCheckedRadio("postsTone") || "casual";
+
+  postsGenerateBtn.disabled = true;
+  setPostsStatusLoading("Generating 3 variants via Claude — ~20-30 sec…");
+
+  const recentThemes = await loadRecentThemes();
+
+  let resp;
+  try {
+    resp = await chrome.runtime.sendMessage({
+      type: "GENERATE_POST",
+      options: { length, tone, recentThemes },
+    });
+  } catch (err) {
+    postsGenerateBtn.disabled = false;
+    setPostsStatus("Could not reach Claude: " + (err.message || err), true);
+    return;
+  }
+  postsGenerateBtn.disabled = false;
+
+  if (!resp || !resp.ok) {
+    setPostsStatus("Generation failed: " + ((resp && resp.error) || "no response"), true);
+    return;
+  }
+
+  const newDrafts = (resp.drafts || []).map((d) => ({ ...d, source: "manual" }));
+  if (!newDrafts.length) {
+    setPostsStatus("Claude returned no variants. Try again.", true);
+    return;
+  }
+
+  const existing = await loadPostDrafts();
+  const merged = [...newDrafts, ...existing];
+  await savePostDrafts(merged);
+
+  setPostsStatus(
+    "✅ 3 variants on theme: " + resp.theme + " (" + resp.length + ", " + resp.tone + "). Pick one, edit if needed, then Open + Paste."
+  );
+  renderPostDrafts(merged);
+}
+
+function renderPostDrafts(drafts) {
+  if (!postsDraftsWrap) return;
+  postsDraftsWrap.innerHTML = "";
+  if (!drafts || !drafts.length) return;
+
+  drafts.forEach((d) => {
+    const card = document.createElement("div");
+    card.className = "posts-draft";
+    if (d.status === "posted") card.classList.add("posted");
+    if (d.status === "discarded") card.classList.add("discarded");
+    card.dataset.id = d.id;
+
+    const head = document.createElement("div");
+    head.className = "posts-draft-head";
+    const meta = document.createElement("div");
+    meta.className = "posts-draft-meta";
+    meta.append(
+      makePostBadge(d.theme || "—", "b-theme"),
+      makePostBadge(d.tone || "—", "b-tone"),
+      makePostBadge((d.length || "—") + (d.variant ? " v" + d.variant : ""), "b-length"),
+      makePostBadge((d.charCount || (d.text || "").length) + " chars", "b-chars")
+    );
+    if (d.source === "auto") meta.appendChild(makePostBadge("auto", "b-auto"));
+    if (d.status === "posted") meta.appendChild(makePostBadge("posted", "b-auto"));
+    head.appendChild(meta);
+    card.appendChild(head);
+
+    const body = document.createElement("div");
+    body.className = "posts-draft-text";
+    body.textContent = d.text || "";
+    card.appendChild(body);
+
+    const actions = document.createElement("div");
+    actions.className = "posts-draft-actions";
+
+    const editBtn = document.createElement("button");
+    editBtn.textContent = "✏ Edit";
+    editBtn.addEventListener("click", async () => {
+      const editing = body.contentEditable === "true";
+      if (editing) {
+        body.contentEditable = "false";
+        editBtn.textContent = "✏ Edit";
+        await persistDraftText(d.id, body.innerText);
+        // Re-render so the "X chars" badge reflects the edited length
+        // (and any other derived metadata stays in sync).
+        const refreshed = await loadPostDrafts();
+        renderPostDrafts(refreshed);
+      } else {
+        body.contentEditable = "true";
+        body.focus();
+        editBtn.textContent = "💾 Save";
+      }
+    });
+    actions.appendChild(editBtn);
+
+    const copyBtn = document.createElement("button");
+    copyBtn.textContent = "📋 Copy";
+    copyBtn.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(body.innerText);
+        copyBtn.textContent = "✓ Copied";
+        setTimeout(() => { copyBtn.textContent = "📋 Copy"; }, 1500);
+      } catch (_) {
+        setPostsStatus("Clipboard blocked. Select and Ctrl+C manually.", true);
+      }
+    });
+    actions.appendChild(copyBtn);
+
+    const openBtn = document.createElement("button");
+    openBtn.className = "primary-btn";
+    openBtn.textContent = "🚀 Open + Paste";
+    openBtn.addEventListener("click", async () => {
+      openBtn.disabled = true;
+      setPostsStatusLoading("Opening LinkedIn feed + pasting…");
+      try {
+        const r = await chrome.runtime.sendMessage({
+          type: "PASTE_POST_TO_FEED",
+          text: body.innerText,
+        });
+        if (r && r.ok) {
+          setPostsStatus("✅ Pasted into composer. Review and click Post in LinkedIn.");
+        } else {
+          setPostsStatus("Paste failed: " + ((r && r.error) || "no response"), true);
+        }
+      } catch (err) {
+        setPostsStatus("Paste error: " + (err.message || err), true);
+      } finally {
+        openBtn.disabled = false;
+      }
+    });
+    actions.appendChild(openBtn);
+
+    const postedBtn = document.createElement("button");
+    postedBtn.textContent = d.status === "posted" ? "✓ Posted" : "Mark posted";
+    postedBtn.disabled = d.status === "posted";
+    postedBtn.addEventListener("click", async () => {
+      await markDraftPosted(d.id, d.theme);
+      const refreshed = await loadPostDrafts();
+      renderPostDrafts(refreshed);
+    });
+    actions.appendChild(postedBtn);
+
+    const deleteBtn = document.createElement("button");
+    deleteBtn.textContent = "🗑";
+    deleteBtn.title = "Delete draft";
+    deleteBtn.addEventListener("click", async () => {
+      const all = await loadPostDrafts();
+      await savePostDrafts(all.filter((x) => x.id !== d.id));
+      const refreshed = await loadPostDrafts();
+      renderPostDrafts(refreshed);
+    });
+    actions.appendChild(deleteBtn);
+
+    card.appendChild(actions);
+    postsDraftsWrap.appendChild(card);
+  });
+}
+
+function makePostBadge(text, cls) {
+  const s = document.createElement("span");
+  s.className = "posts-draft-badge " + (cls || "");
+  s.textContent = text;
+  return s;
+}
+
+async function persistDraftText(id, text) {
+  const drafts = await loadPostDrafts();
+  const updated = drafts.map((d) =>
+    d.id === id ? { ...d, text, charCount: text.length } : d
+  );
+  await savePostDrafts(updated);
+}
+
+async function markDraftPosted(id, theme) {
+  const drafts = await loadPostDrafts();
+  const updated = drafts.map((d) =>
+    d.id === id ? { ...d, status: "posted", postedAt: Date.now() } : d
+  );
+  await savePostDrafts(updated);
+  if (theme) await pushRecentTheme(theme);
+}
+
+async function initPostsAutoDraft() {
+  const { postAutoDraftEnabled, postAutoDraftHour: hourStored } =
+    await chrome.storage.local.get(["postAutoDraftEnabled", "postAutoDraftHour"]);
+  if (postsAutoDraftToggle) postsAutoDraftToggle.checked = !!postAutoDraftEnabled;
+  if (postsAutoDraftHour && Number.isFinite(Number(hourStored))) {
+    postsAutoDraftHour.value = String(Number(hourStored));
+  }
+}
+
+async function onPostsAutoDraftChange() {
+  const enabled = !!(postsAutoDraftToggle && postsAutoDraftToggle.checked);
+  let hour = Number(postsAutoDraftHour && postsAutoDraftHour.value);
+  if (!Number.isFinite(hour) || hour < 0 || hour > 23) hour = 9;
+  await chrome.storage.local.set({
+    postAutoDraftEnabled: enabled,
+    postAutoDraftHour: hour,
+  });
+  // Background rebuilds the alarm from these values on startup/install,
+  // but we also ping it so the new schedule takes effect immediately.
+  try {
+    await chrome.runtime.sendMessage({ type: "RESCHEDULE_POST_ALARM" });
+  } catch (_) {}
+}
+
+if (postsGenerateBtn) postsGenerateBtn.addEventListener("click", handleGeneratePost);
+if (postsAutoDraftToggle) postsAutoDraftToggle.addEventListener("change", onPostsAutoDraftChange);
+if (postsAutoDraftHour) postsAutoDraftHour.addEventListener("change", onPostsAutoDraftChange);
+
+(async function initPostsTab() {
+  if (!postsDraftsWrap) return;
+  await initPostsAutoDraft();
+  const drafts = await loadPostDrafts();
+  renderPostDrafts(drafts);
+})();
