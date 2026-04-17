@@ -117,8 +117,12 @@
     const text = normalizeWhitespace(main.innerText || '');
     if (!text) return [];
 
-    const emails = uniqueMatches(text, EMAIL_RE).filter(isPlausibleEmail);
-    const phones = uniqueMatches(text, PHONE_RE).map(normalizePhone).filter(Boolean);
+    // Whole-page sweep — pull ALL emails/phones from main.innerText, not
+    // just the top 5 (which is the sensible cap when scanning a single
+    // post). 200 is a generous ceiling that still prevents pathological
+    // pages with thousands of matches from blowing up memory.
+    const emails = uniqueMatches(text, EMAIL_RE, 200).filter(isPlausibleEmail);
+    const phones = uniqueMatches(text, PHONE_RE, 200).map(normalizePhone).filter(Boolean);
 
     if (!emails.length && !phones.length) return [];
 
@@ -395,7 +399,12 @@
     return 'https://www.linkedin.com/feed/update/' + urn + '/';
   }
 
-  function uniqueMatches(text, re) {
+  function uniqueMatches(text, re, maxResults) {
+    // Default cap 5 for per-post extraction (a single LinkedIn post shouldn't
+    // have more than a handful of distinct emails/phones — anything higher
+    // is usually noise). Whole-page fallback passes a much larger cap so we
+    // surface ALL contacts on the page, not just the topmost few.
+    const cap = typeof maxResults === 'number' ? maxResults : 5;
     const seen = new Set();
     const out = [];
     let m;
@@ -407,7 +416,7 @@
         seen.add(key);
         out.push(v);
       }
-      if (out.length >= 5) break;
+      if (out.length >= cap) break;
     }
     return out;
   }
