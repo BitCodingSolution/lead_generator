@@ -294,11 +294,14 @@ async function incrementDailyExtractCount() {
 }
 
 async function recordFailure() {
+  const safety = await loadSafety();
   const data = await chrome.storage.local.get(["failureState"]);
   let state = data.failureState || { count: 0, untilTs: 0 };
   state.count += 1;
-  if (state.count >= SAFETY_COMMON.MAX_CONSECUTIVE_FAILURES) {
-    state.untilTs = Date.now() + SAFETY_COMMON.FAILURE_COOLDOWN_MS;
+  // Thresholds are per-mode now — Max is strict (3/10min), Normal is lighter
+  // (5/2min). See config.js for rationale.
+  if (state.count >= safety.MAX_CONSECUTIVE_FAILURES) {
+    state.untilTs = Date.now() + safety.FAILURE_COOLDOWN_MS;
   }
   await chrome.storage.local.set({ failureState: state });
 }
@@ -345,9 +348,14 @@ async function findActiveMessagingTab() {
 }
 
 async function ensureContentScript(tabId) {
+  // allFrames: true — LinkedIn moved the messaging conversation DOM into
+  // an iframe, so the content script must run in every frame. Manifest
+  // also declares all_frames:true for the static injection, but this
+  // dynamic fallback mirrors it when the tab was opened before the
+  // extension's content-script list was registered.
   try {
     await chrome.scripting.executeScript({
-      target: { tabId },
+      target: { tabId, allFrames: true },
       files: ["content.js"],
     });
   } catch (e) {
@@ -355,17 +363,49 @@ async function ensureContentScript(tabId) {
   }
 }
 
-async function sendMessageWithRetry(tabId, message, retries = 4) {
+// Send a message to any frame in the tab, returning the first frame's
+// response that reports ok:true. Default chrome.tabs.sendMessage only
+// targets the top frame — LinkedIn's messaging DOM now lives in an
+// iframe, so we iterate every frame and pick the one that can actually
+// read the conversation.
+async function sendMessageToAnyFrame(tabId, message, retries = 4) {
   let lastErr;
-  for (let i = 0; i < retries; i++) {
+  for (let attempt = 0; attempt < retries; attempt++) {
+    let frames;
     try {
-      return await chrome.tabs.sendMessage(tabId, message);
-    } catch (err) {
-      lastErr = err;
-      await sleep(1500 + rand(0, 700));
+      frames = await chrome.webNavigation.getAllFrames({ tabId });
+    } catch (e) {
+      frames = null;
     }
+    const frameIds = (frames && frames.length
+      ? frames.map((f) => f.frameId)
+      : [0]);
+
+    // Try top frame first (fast-path for the old DOM layout), then the
+    // rest. Dedupe in case the list already has 0 first.
+    const ordered = [0, ...frameIds.filter((id) => id !== 0)];
+
+    let lastResp = null;
+    for (const frameId of ordered) {
+      try {
+        const resp = await chrome.tabs.sendMessage(tabId, message, { frameId });
+        if (resp && resp.ok) return resp;
+        if (resp) lastResp = resp;
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+    if (lastResp) return lastResp; // a frame answered but not ok — surface it
+    await sleep(1500 + rand(0, 700));
   }
-  throw lastErr || new Error("Content script not reachable");
+  throw lastErr || new Error("Content script not reachable in any frame.");
+}
+
+// Kept under the old name for sites that still use a single-frame DOM
+// (e.g. search-results, feed composer). Routes through the multi-frame
+// helper so the behavior is consistent everywhere.
+async function sendMessageWithRetry(tabId, message, retries = 4) {
+  return sendMessageToAnyFrame(tabId, message, retries);
 }
 
 function sleep(ms) {

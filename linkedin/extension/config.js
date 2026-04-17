@@ -13,6 +13,11 @@ const SAFETY_MODES = {
     // and is NOT rate-limited, because extract never touches LinkedIn.
     DAILY_REPLY_CAP: 20,
     MIN_COOLDOWN_MS: 3 * 60 * 1000, // 3 min
+    // Failure backoff — strict in Max mode because consecutive failures can
+    // signal LinkedIn is fighting back (challenge page, rate limit). Better
+    // to step away than keep poking the account.
+    MAX_CONSECUTIVE_FAILURES: 3,
+    FAILURE_COOLDOWN_MS: 10 * 60 * 1000, // 10 min
     AUTO_NAVIGATE: false, // don't change the tab URL
     AUTO_SCROLL: false, // don't scroll programmatically
     AUTO_EXPAND: false, // don't click "…more"
@@ -26,6 +31,11 @@ const SAFETY_MODES = {
   normal: {
     DAILY_REPLY_CAP: 30,
     MIN_COOLDOWN_MS: 90 * 1000,
+    // Failure backoff — looser in Normal mode because most failures in
+    // practice are DOM parse issues or Claude hiccups, not account-safety
+    // signals. User opted into Normal explicitly; minimise friction.
+    MAX_CONSECUTIVE_FAILURES: 5,
+    FAILURE_COOLDOWN_MS: 2 * 60 * 1000, // 2 min
     AUTO_NAVIGATE: true,
     AUTO_SCROLL: true,
     AUTO_EXPAND: true,
@@ -38,9 +48,6 @@ const SAFETY_MODES = {
 
 // Constants shared by both modes
 const SAFETY_COMMON = {
-  // Failure backoff
-  MAX_CONSECUTIVE_FAILURES: 3,
-  FAILURE_COOLDOWN_MS: 10 * 60 * 1000, // 10 min
 
   // Warning pause — if LinkedIn shows an account-warning banner, stop for 7 days
   WARNING_PAUSE_MS: 7 * 24 * 60 * 60 * 1000,
