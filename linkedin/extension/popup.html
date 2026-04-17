@@ -11,7 +11,7 @@
       <h2>Pradip AI — Lead Tracker</h2>
       <div class="header-right">
         <button id="themeToggleBtn" class="icon-btn" title="Toggle dark mode">☀</button>
-        <span class="version">v0.8.1</span>
+        <span class="version">v0.8.2</span>
       </div>
     </header>
 
@@ -320,6 +320,12 @@
           <option value="1-2">1–2 lines</option>
           <option value="5-7">5–7 lines</option>
         </select>
+        <label>Phone number (optional — used only when a reply needs it)</label>
+        <input type="text" id="contactPhoneInput" placeholder="+91 78028 30436" autocomplete="off" />
+        <p class="hint">
+          If blank, Claude will never mention a phone number. If filled,
+          Claude uses EXACTLY this number — no invented digits.
+        </p>
         <div class="settings-actions">
           <button id="saveStyleBtn" class="primary-btn">Save style</button>
         </div>

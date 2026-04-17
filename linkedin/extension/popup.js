@@ -103,6 +103,8 @@ chrome.storage.local.get(
     if (style.signOff) signOffInput.value = style.signOff;
     if (style.tone) toneSelect.value = style.tone;
     if (style.maxLines) maxLinesSelect.value = style.maxLines;
+    const contactPhoneInput = document.getElementById("contactPhoneInput");
+    if (contactPhoneInput && style.phone) contactPhoneInput.value = style.phone;
 
     const mode = data.safetyMode || "max";
     document.querySelectorAll('input[name="safetyMode"]').forEach((r) => {
@@ -663,10 +665,13 @@ testSheetBtn.addEventListener("click", async () => {
 // --- Reply style ---------------------------------------------
 
 saveStyleBtn.addEventListener("click", async () => {
+  const contactPhoneInput = document.getElementById("contactPhoneInput");
+  const phone = (contactPhoneInput && contactPhoneInput.value.trim()) || "";
   const style = {
     signOff: signOffInput.value.trim() || "Best, Jaydip",
     tone: toneSelect.value,
     maxLines: maxLinesSelect.value,
+    phone, // empty string means: never share a number in replies
   };
   await chrome.storage.local.set({ replyStyle: style });
   styleStatus.textContent = "✓ Style saved.";

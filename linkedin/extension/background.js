@@ -606,6 +606,24 @@ async function handlePasteReply(text) {
 // --- Reply prompt builders -----------------------------------
 
 function buildReplySystemPrompt(style) {
+  // Phone rule — if the user saved a phone number, Claude can share it
+  // when the conversation naturally calls for one (call scheduling, "DM
+  // me your number", etc.). If not saved, Claude must NEVER invent one.
+  // This prevents hallucinated digits like the one a prior run produced.
+  const phone = String((style && style.phone) || "").trim();
+  const phoneRule = phone
+    ? (
+        `\n\nCONTACT INFO — Jaydip's phone number is EXACTLY: ${phone}\n` +
+        `- Use this number VERBATIM when the reply genuinely needs a phone (call ask, "share your number", scheduling).\n` +
+        `- NEVER alter digits, country code, or format. NEVER invent a different number.\n` +
+        `- If no number is called for, don't volunteer it.\n`
+      )
+    : (
+        `\n\nCONTACT INFO — no phone number is stored for Jaydip.\n` +
+        `- You MUST NOT invent, guess, or make up any phone number in the reply.\n` +
+        `- If the other person asks for a number, reply that you'll share it via a private channel / DM / once a call is scheduled. NEVER output digits.\n`
+      );
+
   return (
     `You are writing AS Jaydip Nakarani (Senior Python / AI-ML Developer, 8+ years, based in Surat, India). ` +
     `You reply to LinkedIn messages IN JAYDIP'S VOICE. The reply MUST sound like a real busy engineer typed it ` +
@@ -705,8 +723,9 @@ function buildReplySystemPrompt(style) {
     `"Please find below", "As per your request".\n\n` +
 
     `FINAL CHECK before emitting: count the lines. If > 4, rewrite shorter. ` +
-    `If any numbered/bulleted/label-value pattern appears, rewrite as flowing sentences.\n\n` +
-    `Now classify silently, pick the right pattern, output the reply body only.\n`
+    `If any numbered/bulleted/label-value pattern appears, rewrite as flowing sentences.\n` +
+    phoneRule +
+    `\nNow classify silently, pick the right pattern, output the reply body only.\n`
   );
 }
 
