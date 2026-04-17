@@ -1,8 +1,23 @@
 // ============================================================
 // Pradip AI — Lead Tracker + Direct Email Sender
 //
-// CURRENT VERSION: v3.18
+// CURRENT VERSION: v3.19
 //
+// v3.19 changes:
+//   • AUTOPILOT — daily time-driven trigger (autopilotTick) runs the
+//     batch send unattended. Respects all existing safety rails: quiet
+//     hours, BATCH_DAILY_CAP, account-warning pause, already-running
+//     check, no-pending short-circuit. Menu now has three autopilot
+//     entries: toggle on/off, configure hour (default 10 AM), and
+//     status readout. Shared helper startBatchQueue_() was extracted
+//     from sendAllPending so both manual + autopilot paths converge.
+//   • MENU REDESIGN — top level now shows only daily-use actions
+//     (Send / Stop / Queue status) plus the autopilot block. Follow-ups,
+//     reply check, bounce check, and Recyclebin sweep moved into a
+//     "More actions" submenu; orphan reset, dashboard, rebuild, and
+//     Setup triggers moved into a "Maintenance" submenu. Top-level
+//     autopilot label is live (shows "ON (daily 10:00)" or "OFF") so
+//     Jaydip can see state without clicking.
 // v3.18 changes:
 //   • Auto-skip decision moved from regex blocklist to Claude. The extract
 //     prompt now asks Claude to set should_skip + skip_reason based on
@@ -82,6 +97,7 @@
 //     Refresh dashboard, Stop queue.
 // ============================================================
 
+const VERSION = '3.19';
 const SHEET_NAME = 'LinkedIn';
 const RECYCLEBIN_SHEET_NAME = 'Recyclebin';
 
@@ -195,6 +211,17 @@ const PROP_QUEUE_STARTED_AT   = 'batch.startedAt';    // ms epoch — when the q
 const PROP_QUEUE_CURRENT_ROW  = 'batch.currentRow';   // row being processed right now
 const PROP_QUEUE_CURRENT_EMAIL = 'batch.currentEmail'; // recipient being processed right now
 const PROP_QUEUE_LAST_TICK    = 'batch.lastTick';     // ms epoch — last processQueue tick
+
+// ──────────── Autopilot props ────────────
+// Autopilot = daily time-driven trigger that runs sendAllPending silently.
+// Lets Jaydip keep outreach moving on weekends / days he isn't opening the
+// sheet. Respects the same safety rails as the manual send path (quiet
+// hours, daily cap, warning pause, no-pending short-circuit).
+const PROP_AUTOPILOT_ENABLED = 'autopilot.enabled';   // '1' or '0'
+const PROP_AUTOPILOT_HOUR    = 'autopilot.hour';      // 0-23 local hour to fire
+const PROP_AUTOPILOT_LAST_RUN = 'autopilot.lastRun';  // ms epoch — last fire
+const AUTOPILOT_DEFAULT_HOUR = 10;                    // 10 AM local
+const AUTOPILOT_TRIGGER_HANDLER = 'autopilotTick';
 
 // ──────────── Blocklist (never email these) ────────────
 // Matched case-insensitive as a substring against the Company column.
@@ -350,7 +377,7 @@ function doGet(e) {
   return jsonOut({
     ok: true,
     service: 'Pradip AI Lead Tracker',
-    version: '3.13',
+    version: VERSION,
     sheets: { main: SHEET_NAME },
     time: new Date().toISOString()
   });
@@ -1260,8 +1287,21 @@ function sendAllPending() {
   );
   if (resp !== ui.Button.OK) return;
 
+  startBatchQueue_(sheet, queue, batchSize);
+
+  // Auto-open the live status sidebar — Jaydip can watch progress without
+  // hunting in the menu. The sidebar self-refreshes every 3 seconds.
+  showQueueStatusSidebar();
+}
+
+/**
+ * Commit a batch of rows to the queue and start the 1-min time trigger.
+ * Shared by the manual menu path (sendAllPending) and the daily autopilot
+ * tick — both reach the same end state after their respective gates.
+ */
+function startBatchQueue_(sheet, queueRows, batchSize) {
   // Mark all queued rows visibly + persist queue
-  queue.forEach(function (rowNumber) {
+  queueRows.forEach(function (rowNumber) {
     sheet.getRange(rowNumber, COL.STATUS + 1).setValue(QUEUED_STATUS);
   });
   SpreadsheetApp.flush();
@@ -1273,7 +1313,7 @@ function sendAllPending() {
   props.setProperty(PROP_QUEUE_SKIPPED, '0');
 
   saveQueueState(
-    queue.map(function (r) { return { r: r, k: 'send' }; }),
+    queueRows.map(function (r) { return { r: r, k: 'send' }; }),
     batchSize, 0
   );
 
@@ -1287,10 +1327,254 @@ function sendAllPending() {
     'Queued ' + batchSize + ' emails. First send in under 1 minute.',
     '🚀 Batch started', 8
   );
+}
 
-  // Auto-open the live status sidebar — Jaydip can watch progress without
-  // hunting in the menu. The sidebar self-refreshes every 3 seconds.
-  showQueueStatusSidebar();
+// ============================================================
+// AUTOPILOT — daily unattended batch send
+// ============================================================
+
+/**
+ * Daily time-driven trigger handler. Silently runs sendAllPending's send
+ * logic when autopilot is enabled. All safety rails (quiet hours, daily
+ * cap, warning pause, already-running check) still apply — autopilot
+ * just removes the UI confirm dialog. Logs to the execution log so
+ * Jaydip can audit weekend activity.
+ */
+function autopilotTick() {
+  const props = PropertiesService.getDocumentProperties();
+  const enabled = props.getProperty(PROP_AUTOPILOT_ENABLED) === '1';
+  props.setProperty(PROP_AUTOPILOT_LAST_RUN, String(Date.now()));
+
+  if (!enabled) {
+    console.log('[autopilot] skipped — disabled');
+    return;
+  }
+
+  const sheet = SpreadsheetApp.getActive().getSheetByName(SHEET_NAME);
+  if (!sheet) {
+    console.log('[autopilot] skipped — LinkedIn sheet missing');
+    return;
+  }
+
+  // Don't start a new batch if one is already running
+  let running;
+  try { running = isBatchRunning(); }
+  catch (e) {
+    const st = loadQueueState();
+    running = !!(st.queue && st.queue.length);
+  }
+  if (running) {
+    console.log('[autopilot] skipped — batch already running');
+    return;
+  }
+
+  if (isQuietHours()) {
+    console.log('[autopilot] skipped — quiet hours');
+    return;
+  }
+
+  const pending = findPendingRows(sheet);
+  if (!pending.length) {
+    console.log('[autopilot] skipped — no pending rows');
+    return;
+  }
+
+  const sentToday = countSentToday(sheet);
+  const remainingSlots = BATCH_DAILY_CAP - sentToday;
+  if (remainingSlots <= 0) {
+    console.log('[autopilot] skipped — daily cap hit (' + sentToday + '/' + BATCH_DAILY_CAP + ')');
+    return;
+  }
+
+  const batchSize = Math.min(pending.length, BATCH_PER_RUN_CAP, remainingSlots);
+  const queue = pending.slice(0, batchSize);
+
+  startBatchQueue_(sheet, queue, batchSize);
+  console.log('[autopilot] started batch — ' + batchSize + ' rows queued');
+}
+
+function isAutopilotEnabled_() {
+  return PropertiesService.getDocumentProperties().getProperty(PROP_AUTOPILOT_ENABLED) === '1';
+}
+
+function getAutopilotHour_() {
+  const raw = PropertiesService.getDocumentProperties().getProperty(PROP_AUTOPILOT_HOUR);
+  // Explicit null/empty check before Number() — Number(null) is 0, which
+  // would silently override the sensible default with midnight (inside
+  // quiet hours) on first run.
+  if (raw === null || raw === '' || typeof raw === 'undefined') {
+    return AUTOPILOT_DEFAULT_HOUR;
+  }
+  const n = Number(raw);
+  if (!isFinite(n) || n < 0 || n > 23) return AUTOPILOT_DEFAULT_HOUR;
+  return Math.floor(n);
+}
+
+function deleteAutopilotTriggers_() {
+  try {
+    ScriptApp.getProjectTriggers().forEach(function (t) {
+      if (t.getHandlerFunction() === AUTOPILOT_TRIGGER_HANDLER) {
+        ScriptApp.deleteTrigger(t);
+      }
+    });
+  } catch (e) {
+    console.log('[autopilot] trigger delete failed: ' + e.message);
+  }
+}
+
+function installAutopilotTrigger_(hour) {
+  deleteAutopilotTriggers_();
+  ScriptApp.newTrigger(AUTOPILOT_TRIGGER_HANDLER)
+    .timeBased()
+    .atHour(hour)
+    .everyDays(1)
+    .create();
+}
+
+/**
+ * Menu handler: flip autopilot on/off. When turning ON, also installs a
+ * daily trigger at the configured hour (default 10 AM local).
+ */
+function toggleAutopilot() {
+  const ui = SpreadsheetApp.getUi();
+  const props = PropertiesService.getDocumentProperties();
+  const wasEnabled = isAutopilotEnabled_();
+
+  if (wasEnabled) {
+    props.setProperty(PROP_AUTOPILOT_ENABLED, '0');
+    deleteAutopilotTriggers_();
+    buildPradipMenu_();  // refresh the live ON/OFF label in the menu
+    ui.alert('🤖 Autopilot turned OFF.\n\nDaily trigger removed. Manual sends still work as before.');
+    return;
+  }
+
+  const hour = getAutopilotHour_();
+  try {
+    installAutopilotTrigger_(hour);
+  } catch (e) {
+    ui.alert('❌ Could not install daily trigger: ' + e.message + '\n\n' +
+             'Run "Setup triggers" once, then try again.');
+    return;
+  }
+  props.setProperty(PROP_AUTOPILOT_ENABLED, '1');
+  buildPradipMenu_();  // refresh the live ON/OFF label in the menu
+
+  // Warn if the scheduled hour falls inside quiet hours — the tick will
+  // fire but the quiet-hour gate will reject every run, silently.
+  const quietWarn = isHourInQuietWindow_(hour)
+    ? '\n\n⚠ WARNING: ' + hour + ':00 is inside your quiet hours (' +
+      BATCH_QUIET_START_HOUR + ':00–' + BATCH_QUIET_END_HOUR +
+      ':00). The daily tick will fire but skip every run. Change the hour.'
+    : '';
+
+  ui.alert(
+    '🤖 Autopilot turned ON.\n\n' +
+    'Runs daily at ' + hour + ':00 local time.\n' +
+    'Respects quiet hours, daily cap, and account warnings.' +
+    quietWarn +
+    '\n\nChange the hour via "Autopilot settings" in the menu.'
+  );
+}
+
+/**
+ * True if the given hour-of-day is inside the BATCH_QUIET_START/END window.
+ * Handles wrap-around (e.g. 23 → 7 means 23, 0, 1, ..., 6 all count as quiet).
+ */
+function isHourInQuietWindow_(h) {
+  if (BATCH_QUIET_START_HOUR === BATCH_QUIET_END_HOUR) return false;
+  if (BATCH_QUIET_START_HOUR < BATCH_QUIET_END_HOUR) {
+    return h >= BATCH_QUIET_START_HOUR && h < BATCH_QUIET_END_HOUR;
+  }
+  return h >= BATCH_QUIET_START_HOUR || h < BATCH_QUIET_END_HOUR;
+}
+
+/**
+ * Menu handler: prompt for hour-of-day, re-install trigger if enabled.
+ */
+function configureAutopilot() {
+  const ui = SpreadsheetApp.getUi();
+  const cur = getAutopilotHour_();
+  const resp = ui.prompt(
+    'Autopilot hour (0-23)',
+    'Currently: ' + cur + ':00 local.\n\n' +
+    'Enter new hour (0-23). Jaydip\'s quiet hours are ' +
+    BATCH_QUIET_START_HOUR + ':00–' + BATCH_QUIET_END_HOUR +
+    ':00 — pick outside that window.',
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (resp.getSelectedButton() !== ui.Button.OK) return;
+
+  const raw = String(resp.getResponseText() || '').trim();
+  // Explicit empty check before Number() — Number('') is 0, which would
+  // silently save midnight (inside quiet hours) if the user tapped OK
+  // with no input. Also reject non-integer-looking input up-front.
+  if (!raw || !/^\d+$/.test(raw)) {
+    ui.alert('Invalid hour. Must be a whole number 0-23 (e.g. 10).');
+    return;
+  }
+  const n = Number(raw);
+  if (!isFinite(n) || n < 0 || n > 23) {
+    ui.alert('Invalid hour. Must be 0-23.');
+    return;
+  }
+
+  // Warn but don't block — the user may genuinely want an off-hours time
+  // for some reason, and the quiet-hour gate will protect them anyway.
+  if (isHourInQuietWindow_(n)) {
+    const confirm = ui.alert(
+      '⚠ Quiet hours overlap',
+      n + ':00 is inside your quiet hours (' +
+      BATCH_QUIET_START_HOUR + ':00–' + BATCH_QUIET_END_HOUR + ':00).\n\n' +
+      'The daily tick will fire at ' + n + ':00 but will SKIP every run ' +
+      '(quiet-hour gate rejects sends). Pick a time outside ' +
+      BATCH_QUIET_END_HOUR + ':00–' + BATCH_QUIET_START_HOUR + ':00 so sends actually happen.\n\n' +
+      'Save ' + n + ':00 anyway?',
+      ui.ButtonSet.YES_NO
+    );
+    if (confirm !== ui.Button.YES) return;
+  }
+
+  PropertiesService.getDocumentProperties().setProperty(PROP_AUTOPILOT_HOUR, String(n));
+
+  // Re-install trigger at the new hour if autopilot is currently on
+  if (isAutopilotEnabled_()) {
+    try {
+      installAutopilotTrigger_(n);
+    } catch (e) {
+      ui.alert('Saved hour, but trigger re-install failed: ' + e.message);
+      return;
+    }
+  }
+
+  buildPradipMenu_();  // refresh the live hour label in the menu
+
+  ui.alert('Autopilot hour set to ' + n + ':00.' +
+           (isAutopilotEnabled_() ? ' Trigger re-scheduled.' : ' (Enable autopilot to activate.)'));
+}
+
+/**
+ * Menu handler: show autopilot status + next run estimate.
+ */
+function showAutopilotStatus() {
+  const ui = SpreadsheetApp.getUi();
+  const enabled = isAutopilotEnabled_();
+  const hour = getAutopilotHour_();
+  const lastRunMs = Number(PropertiesService.getDocumentProperties().getProperty(PROP_AUTOPILOT_LAST_RUN) || 0);
+  const lastRunTxt = lastRunMs
+    ? new Date(lastRunMs).toLocaleString()
+    : 'never';
+
+  const lines = [
+    '🤖 Autopilot status',
+    '',
+    'Enabled: ' + (enabled ? 'YES' : 'no'),
+    'Scheduled hour: ' + hour + ':00 local',
+    'Last tick fired: ' + lastRunTxt,
+    '',
+    'Daily cap: ' + BATCH_DAILY_CAP + ' emails/day',
+    'Quiet hours: ' + BATCH_QUIET_START_HOUR + ':00–' + BATCH_QUIET_END_HOUR + ':00',
+  ];
+  ui.alert(lines.join('\n'));
 }
 
 /**
@@ -2333,24 +2617,57 @@ function buildHtmlBody(rawBody, mode) {
 // ============================================================
 
 function onOpen() {
-  SpreadsheetApp.getUi()
-    .createMenu('📧 Pradip AI')
-    .addItem('1. Setup triggers (run once)', 'setupTriggers')
-    .addSeparator()
-    .addItem('🚀 Send all pending (60–90s delay)', 'sendAllPending')
+  buildPradipMenu_();
+}
+
+/**
+ * Builds (or rebuilds) the 📧 Pradip AI menu. Called by onOpen and by any
+ * action that changes state shown in the menu labels (autopilot toggle,
+ * hour change), since Apps Script custom menus don't auto-refresh on
+ * state changes — they're a one-shot build.
+ */
+function buildPradipMenu_() {
+  const ui = SpreadsheetApp.getUi();
+
+  // Live autopilot state in the top-level item so Jaydip always sees it at
+  // a glance. If autopilot is ON, the label reflects that + the scheduled
+  // hour, so there's no doubt whether tomorrow's send will fire.
+  const autopilotOn = isAutopilotEnabled_();
+  const autopilotHour = getAutopilotHour_();
+  const autopilotLabel = autopilotOn
+    ? '🟢 Autopilot: ON (daily ' + autopilotHour + ':00) — click to turn OFF'
+    : '⚪ Autopilot: OFF — click to turn ON';
+
+  // Rarely-used actions live in submenus so the top level stays readable.
+  const moreActions = ui.createMenu('➕ More actions')
     .addItem('📮 Send follow-ups (3+ days no reply)', 'sendAllFollowups')
-    .addItem('📊 Queue status (live sidebar)', 'showQueueStatusSidebar')
-    .addItem('⏹ Stop batch queue', 'stopQueue')
-    .addItem('♻ Reset orphan Queued rows', 'resetOrphanQueued')
-    .addSeparator()
     .addItem('📨 Check replies', 'checkReplies')
     .addItem('🔍 Check bounced emails', 'checkBounces')
     .addSeparator()
     .addItem('🗑 Sweep junk → Recyclebin', 'sweepToRecyclebin')
-    .addItem('♻ Empty Recyclebin', 'emptyRecyclebin')
-    .addSeparator()
+    .addItem('♻ Empty Recyclebin', 'emptyRecyclebin');
+
+  const maintenance = ui.createMenu('🔧 Maintenance')
+    .addItem('♻ Reset orphan Queued rows', 'resetOrphanQueued')
     .addItem('📊 Refresh dashboard', 'buildDashboard')
-    .addItem('Rebuild headers + checkboxes', 'rebuildSheet')
+    .addItem('🧱 Rebuild headers + checkboxes', 'rebuildSheet')
+    .addSeparator()
+    .addItem('🔐 Setup triggers (run once)', 'setupTriggers');
+
+  ui.createMenu('📧 Pradip AI')
+    // ── Daily actions — the things Jaydip touches most ──
+    .addItem('🚀 Send all pending (60–90s delay)', 'sendAllPending')
+    .addItem('⏹ Stop batch queue', 'stopQueue')
+    .addItem('📊 Queue status (live sidebar)', 'showQueueStatusSidebar')
+    .addSeparator()
+    // ── Autopilot — weekend/unattended sending ──
+    .addItem(autopilotLabel, 'toggleAutopilot')
+    .addItem('🛠 Autopilot settings (hour)', 'configureAutopilot')
+    .addItem('ℹ Autopilot status', 'showAutopilotStatus')
+    .addSeparator()
+    // ── Everything else tucked away ──
+    .addSubMenu(moreActions)
+    .addSubMenu(maintenance)
     .addToUi();
 }
 
