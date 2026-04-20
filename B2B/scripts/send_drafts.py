@@ -36,6 +36,18 @@ def find_account(outlook, email):
     return None
 
 
+def dismiss_reading_pane(outlook, account):
+    """Switch active explorer off any draft so Send() is not blocked by
+    'inline response mail item'."""
+    try:
+        exp = outlook.ActiveExplorer()
+        if exp:
+            inbox = account.DeliveryStore.GetDefaultFolder(6)
+            exp.CurrentFolder = inbox
+    except Exception:
+        pass
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--file', required=True)
@@ -72,15 +84,21 @@ def main():
         sys.exit(2)
 
     ns = outlook.GetNamespace('MAPI')
+    dismiss_reading_pane(outlook, acc)
     con = sqlite3.connect(DB)
 
     sent_count = 0
+    errors = []
     for idx, (i, row) in enumerate(todo.iterrows()):
         eid = str(row['outlook_entry_id']).strip()
         lead_id = row['lead_id']
         try:
             item = ns.GetItemFromID(eid)
-            item.Send()
+            if getattr(item, 'Sent', False):
+                # Already sent earlier — DB was not reconciled. Just backfill sent_at.
+                print(f"  [{lead_id}] already sent in Outlook, reconciling DB")
+            else:
+                item.Send()
             sent_ts = dt.datetime.now().isoformat(timespec='seconds')
             con.execute(
                 "UPDATE emails_sent SET sent_at=? WHERE outlook_entry_id=?",
@@ -103,7 +121,9 @@ def main():
                 print(f"       waiting {wait}s before next send...")
                 time.sleep(wait)
         except Exception as e:
-            print(f"  [ERR] {lead_id}: {e}")
+            msg = f"[ERR] {lead_id}: {e}"
+            print(msg, file=sys.stderr)
+            errors.append(msg)
             df.at[i, 'notes'] = (str(row.get('notes') or '') + f'|SEND_ERR:{e}')[:500]
 
     # Save Excel back
@@ -123,7 +143,11 @@ def main():
     con.commit()
     con.close()
 
-    print(f"\n[OK] Sent: {sent_count}/{len(todo)}")
+    print(f"\n[OK] Sent: {sent_count}/{len(todo)}  Errors: {len(errors)}")
+    if errors:
+        for e in errors:
+            print(e, file=sys.stderr)
+        sys.exit(3)
 
 
 if __name__ == '__main__':

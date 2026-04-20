@@ -124,7 +124,7 @@ export type Job = {
   id: string
   label: string
   status: "queued" | "running" | "done" | "error" | string
-  logs: string
+  logs: string | string[]
   returncode?: number | null
   started_at?: string
   ended_at?: string

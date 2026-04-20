@@ -75,7 +75,10 @@ export function Terminal({
             {lines.map((line, i) => {
               const low = line.toLowerCase()
               let cls = ""
-              if (low.includes("error") || low.includes("traceback") || low.includes("failed")) cls = "err"
+              if (
+                /\[err\]|\berror\b|traceback|\bfailed\b|\bexception\b/i.test(line) ||
+                low.startsWith("err ")
+              ) cls = "err"
               else if (low.includes("warn")) cls = "warn"
               else if (low.includes("ok") || low.includes("success") || low.includes("done")) cls = "ok"
               return (

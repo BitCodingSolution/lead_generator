@@ -1,15 +1,16 @@
 "use client"
 
 import * as React from "react"
-import useSWR from "swr"
+import useSWR, { useSWRConfig } from "swr"
 import { motion } from "framer-motion"
 import { toast } from "sonner"
 import { api, swrFetcher } from "@/lib/api"
 import { useJob } from "@/hooks/useJob"
-import type { BatchFile, IndustryRow, Stats } from "@/lib/types"
+import type { IndustryRow, Stats } from "@/lib/types"
 import { PageHeader } from "@/components/page-header"
 import { StatusChip } from "@/components/status-chip"
 import { Terminal } from "@/components/terminal"
+import { Stepper, type StepState, type StepperNode } from "@/components/stepper"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
 import {
@@ -20,495 +21,754 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog"
-import {
-  PackageSearch,
-  PenLine,
-  FileOutput,
-  Send,
-  RefreshCw,
-  Play,
-  FileText,
+  ArrowRight,
+  MailCheck,
+  Inbox,
+  Rocket,
 } from "lucide-react"
 import { cn, fmt } from "@/lib/utils"
 
-type StepKey = "pick" | "drafts" | "outlook" | "send" | "sync"
+// ---------------- Types ----------------
 
-type Step = {
-  key: StepKey
-  num: number
-  title: string
-  subtitle: string
-  icon: React.ComponentType<{ className?: string }>
+type ScheduleInfo = {
+  in_window: boolean
+  seconds_until_open?: number
+  seconds_remaining?: number
+  next_window_opens_at?: string
+  next_window_closes_at?: string
 }
 
-const STEPS: Step[] = [
-  { key: "pick", num: 1, title: "Pick a batch", subtitle: "Select leads by industry + tier", icon: PackageSearch },
-  { key: "drafts", num: 2, title: "Generate drafts", subtitle: "Claude writes tailored emails", icon: PenLine },
-  { key: "outlook", num: 3, title: "Write to Outlook", subtitle: "Push to your Outbox folder", icon: FileOutput },
-  { key: "send", num: 4, title: "Send", subtitle: "Real sends via SMTP (manual confirm)", icon: Send },
-  { key: "sync", num: 5, title: "Sync & scan replies", subtitle: "Pull sent items + inbox replies", icon: RefreshCw },
+type SendMode = "now" | "schedule" | "draft"
+type StageKey = "pick" | "generate" | "outlook" | "send"
+
+const STAGES: { key: StageKey; label: string }[] = [
+  { key: "pick", label: "Pick" },
+  { key: "generate", label: "Generate" },
+  { key: "outlook", label: "Outlook" },
+  { key: "send", label: "Send" },
 ]
 
+// ---------------- Page ----------------
+
 export default function CampaignsPage() {
+  // Data
   const { data: stats } = useSWR<Stats>("/api/stats", swrFetcher, {
     refreshInterval: 30000,
   })
-  const { data: industries } = useSWR<IndustryRow[]>("/api/industries", swrFetcher)
-  const { data: files, mutate: refetchFiles } = useSWR<BatchFile[]>(
-    "/api/batches/files",
+  const { data: industries } = useSWR<IndustryRow[]>(
+    "/api/industries",
     swrFetcher,
-    { refreshInterval: 15000 },
+  )
+  const { data: schedule } = useSWR<ScheduleInfo>("/api/schedule", swrFetcher, {
+    refreshInterval: 30000,
+  })
+
+  // Form state
+  const [industry, setIndustry] = React.useState("")
+  const [count, setCount] = React.useState<number>(20)
+  const [tier, setTier] = React.useState<string>("")  // "" = auto/any
+  const [sendMode, setSendMode] = React.useState<SendMode>("schedule")
+  const [noJitter, setNoJitter] = React.useState(false)
+
+  // Jobs
+  const [activeJobId, setActiveJobId] = React.useState<string | null>(null)
+  const [lastCompletedJobId, setLastCompletedJobId] = React.useState<string | null>(null)
+  const [secondaryLabel, setSecondaryLabel] = React.useState<string | null>(null)
+
+  const displayedJobId = activeJobId || lastCompletedJobId
+  const { job } = useJob(displayedJobId)
+
+  const jobRunning =
+    job?.status === "running" || job?.status === "queued"
+
+  const { mutate: swrMutate } = useSWRConfig()
+
+  // When a running job finishes, demote to lastCompleted + refresh affected data
+  React.useEffect(() => {
+    if (!activeJobId) return
+    if (job?.status === "done" || job?.status === "error") {
+      setLastCompletedJobId(activeJobId)
+      setActiveJobId(null)
+      if (job.status === "done") {
+        toast.success("Pipeline finished", { description: activeJobId })
+      } else {
+        toast.error("Pipeline failed", { description: activeJobId })
+      }
+      // Revalidate anything the pipeline may have changed
+      swrMutate("/api/stats")
+      swrMutate("/api/pending-drafts")
+      swrMutate("/api/industries")
+      swrMutate("/api/recent-sent")
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [job?.status])
+
+  // Derived
+  const daily_quota = stats?.daily_quota ?? 25
+  const remaining = stats?.remaining_today ?? 0
+  const used_today = Math.max(0, daily_quota - remaining)
+
+  const selectedIndustry = React.useMemo(
+    () => industries?.find((i) => i.industry === industry),
+    [industries, industry],
   )
 
-  // Per-step job state
-  const [jobs, setJobs] = React.useState<Record<StepKey, string | null>>({
-    pick: null,
-    drafts: null,
-    outlook: null,
-    send: null,
-    sync: null,
-  })
+  const countExceedsQuota = sendMode === "now" && count > remaining
+  const countExceedsAvailable =
+    selectedIndustry ? count > selectedIndustry.available : false
 
-  // Step inputs
-  const [pickForm, setPickForm] = React.useState({
-    industry: "",
-    count: 20,
-    tier: "",
-    city: "",
-  })
-  const [selectedFile, setSelectedFile] = React.useState<string>("")
-  const [draftLimit, setDraftLimit] = React.useState<number>(0)
-  const [sendCount, setSendCount] = React.useState<number>(5)
-  const [noJitter, setNoJitter] = React.useState(false)
-  const [confirmSend, setConfirmSend] = React.useState(false)
+  const canRun =
+    !!industry &&
+    count > 0 &&
+    !jobRunning &&
+    !countExceedsQuota &&
+    !countExceedsAvailable
 
-  React.useEffect(() => {
-    if (!selectedFile && files && files.length > 0) {
-      setSelectedFile(files[0].name)
+  // Parse stages from logs
+  const stageNodes = React.useMemo<StepperNode[]>(() => {
+    const lines: string[] = Array.isArray(job?.logs)
+      ? job.logs
+      : (typeof job?.logs === "string" ? job.logs.split("\n") : [])
+    const seen: StageKey[] = []
+    let done = false
+
+    // Segment lines by current stage so we can count per-stage progress
+    const segments: Record<StageKey, string[]> = {
+      pick: [], generate: [], outlook: [], send: [],
     }
-  }, [files, selectedFile])
+    let cur: StageKey | null = null
 
-  async function run(key: StepKey, path: string, body?: unknown) {
+    for (const line of lines) {
+      const m = line.match(/\[STAGE\]\s+(\w+)/)
+      if (m) {
+        const tag = m[1].toLowerCase()
+        let key: StageKey | null = null
+        if (tag === "pick") key = "pick"
+        else if (tag === "generate") key = "generate"
+        else if (tag === "outlook") key = "outlook"
+        else if (tag === "send" || tag === "schedule" || tag === "skip")
+          key = "send"
+        if (key) {
+          cur = key
+          if (seen[seen.length - 1] !== key) seen.push(key)
+        }
+        continue
+      }
+      if (/\[DONE\]\s+pipeline\s+complete/i.test(line)) done = true
+      if (cur) segments[cur].push(line)
+    }
+
+    const total = Number(count) || 0
+
+    // pick: "Picked N leads" → done=N once seen, else 0 while running
+    let pickDone = 0
+    for (const ln of segments.pick) {
+      const pm = ln.match(/Picked\s+(\d+)\s+leads/i)
+      if (pm) pickDone = Math.max(pickDone, Number(pm[1]))
+    }
+    // generate / outlook: count "] OK" markers within segment
+    const countOk = (seg: string[]) =>
+      seg.reduce((n, ln) => n + (/\]\s+OK\b/.test(ln) || /\]\s+\S+\s+OK\b/.test(ln) ? 1 : 0), 0)
+    const genDone = countOk(segments.generate)
+    const outDone = countOk(segments.outlook)
+    // send: prefer "[n/m] SENT" latest, else count SENT lines
+    let sendDone = 0
+    for (const ln of segments.send) {
+      const sm = ln.match(/\[(\d+)\/\d+\]\s+SENT\b/)
+      if (sm) sendDone = Math.max(sendDone, Number(sm[1]))
+      else if (/\bSENT\b/.test(ln)) sendDone += 1
+    }
+
+    const counts: Record<StageKey, number> = {
+      pick: pickDone,
+      generate: genDone,
+      outlook: outDone,
+      send: sendDone,
+    }
+
+    const isError = job?.status === "error"
+    const current = seen[seen.length - 1]
+    const currentIdx = current ? STAGES.findIndex((s) => s.key === current) : -1
+
+    return STAGES.map((s, idx) => {
+      let state: StepState = "pending"
+      if (done) {
+        state = "done"
+      } else if (currentIdx === -1) {
+        state = "pending"
+      } else if (idx < currentIdx) {
+        state = "done"
+      } else if (idx === currentIdx) {
+        if (isError) state = "error"
+        else if (job?.status === "done") state = "done"
+        else state = "active"
+      }
+      const node: StepperNode = { key: s.key, label: s.label, state }
+      if (total > 0) {
+        const d = state === "done"
+          ? total
+          : state === "pending"
+            ? 0
+            : Math.min(counts[s.key], total)
+        node.count = { done: d, total }
+      }
+      return node
+    })
+  }, [job?.logs, job?.status, count])
+
+  // ---------------- Actions ----------------
+
+  async function runPipeline() {
+    if (!canRun) return
     try {
-      const res = await api.post<{ job_id: string }>(path, body)
+      const body: {
+        industry: string
+        count: number
+        tier?: number
+        send_mode: SendMode
+        no_jitter: boolean
+      } = {
+        industry,
+        count: Number(count) || 0,
+        send_mode: sendMode,
+        no_jitter: noJitter,
+      }
+      if (tier) body.tier = Number(tier)
+      const res = await api.post<{ job_id: string }>(
+        "/api/actions/run-pipeline",
+        body,
+      )
       if (!res.job_id) throw new Error("No job_id returned")
-      setJobs((j) => ({ ...j, [key]: res.job_id }))
-      toast.success("Job started", { description: res.job_id })
+      setSecondaryLabel(null)
+      setActiveJobId(res.job_id)
+      setLastCompletedJobId(null)
+      toast.success("Pipeline started", { description: res.job_id })
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      toast.error("Failed to start", { description: msg })
+      toast.error("Failed to start pipeline", { description: msg })
     }
   }
 
-  const runPick = () => {
-    if (!pickForm.industry) {
-      toast.error("Pick an industry first")
-      return
-    }
-    run("pick", "/api/actions/pick-batch", {
-      industry: pickForm.industry,
-      count: Number(pickForm.count) || 20,
-      tier: pickForm.tier || undefined,
-      city: pickForm.city || undefined,
-    }).then(() => {
-      setTimeout(() => refetchFiles(), 4000)
-    })
-  }
-
-  const runDrafts = () => {
-    if (!selectedFile) return toast.error("Pick a batch file")
-    run("drafts", "/api/actions/generate-drafts", {
-      file: selectedFile,
-      limit: draftLimit || undefined,
-    })
-  }
-
-  const runOutlook = () => {
-    if (!selectedFile) return toast.error("Pick a batch file")
-    run("outlook", "/api/actions/write-outlook", { file: selectedFile })
-  }
-
-  const runSend = () => {
-    if (!selectedFile) return toast.error("Pick a batch file")
-    const n = Number(sendCount) || 0
-    if (n <= 0) return toast.error("Count must be > 0")
-    setConfirmSend(false)
-    run("send", "/api/actions/send-drafts", {
-      file: selectedFile,
-      count: n,
-      no_jitter: noJitter || undefined,
-    })
-  }
-
-  const runSync = async () => {
+  async function runSecondary(path: string, label: string) {
+    if (jobRunning) return
     try {
-      const a = await api.post<{ job_id: string }>("/api/actions/sync-sent")
-      setJobs((j) => ({ ...j, sync: a.job_id }))
-      toast.success("Syncing sent items…")
-      // chain scan-replies after sync completes (best-effort — API lets both run)
-      await api.post<{ job_id: string }>("/api/actions/scan-replies")
-      toast.success("Scanning replies in background")
+      const res = await api.post<{ job_id: string }>(path, {})
+      if (!res.job_id) throw new Error("No job_id returned")
+      setSecondaryLabel(label)
+      setActiveJobId(res.job_id)
+      setLastCompletedJobId(null)
+      toast.success(`${label} started`, { description: res.job_id })
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
-      toast.error("Failed", { description: msg })
+      toast.error(`Failed: ${label}`, { description: msg })
     }
   }
 
-  const remaining = stats?.remaining_today ?? 0
+  // ---------------- Render ----------------
 
   return (
     <div className="space-y-6">
       <PageHeader
         title="Campaigns"
-        subtitle="The control room. Run the outreach pipeline, one step at a time."
-        actions={
-          <div className="flex items-center gap-2">
-            <div className="rounded-md border border-zinc-800 bg-zinc-900/40 px-2.5 py-1 text-[11px] text-zinc-400">
-              Remaining today{" "}
-              <span className="ml-1 tnum text-[hsl(250_80%_78%)] font-medium">
-                {fmt(remaining)}
-              </span>
-            </div>
-          </div>
-        }
+        subtitle="Run the entire outreach pipeline with a single click."
       />
 
-      {/* Shared batch picker */}
-      <div className="rounded-xl border border-zinc-800/80 bg-[#18181b] p-4">
-        <div className="flex flex-wrap items-end gap-3">
-          <div className="flex-1 min-w-[260px]">
-            <label className="text-[11px] uppercase tracking-[0.15em] text-zinc-500 block mb-1.5">
-              Active batch file
-            </label>
-            <Select
-              value={selectedFile || "__none"}
-              onValueChange={(v) => setSelectedFile(v === "__none" ? "" : v)}
-            >
-              <SelectTrigger className="!w-full bg-zinc-900/40 border-zinc-800">
-                <SelectValue placeholder="Choose a batch file…" />
-              </SelectTrigger>
-              <SelectContent>
-                {(!files || files.length === 0) && (
-                  <SelectItem value="__none">No batch files yet</SelectItem>
-                )}
-                {files?.map((f) => (
-                  <SelectItem key={f.name} value={f.name}>
-                    <FileText className="size-3.5 mr-1 text-zinc-500" />
-                    {f.name}{" "}
-                    <span className="text-zinc-500 ml-2 text-xs">{f.size_kb} KB</span>
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+      <PendingDraftsBanner onAction={runSecondary} jobRunning={jobRunning} />
+
+      {/* ===== HERO CARD ===== */}
+      <motion.div
+        initial={{ opacity: 0, y: 6 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.22 }}
+        className="relative overflow-hidden rounded-2xl border border-zinc-800/80 bg-[#18181b] p-6"
+      >
+        {/* Violet wash */}
+        <div
+          className="pointer-events-none absolute -top-24 -right-24 size-64 rounded-full opacity-60 blur-3xl"
+          style={{
+            background:
+              "radial-gradient(closest-side, hsl(250 80% 55% / 0.35), transparent 70%)",
+          }}
+        />
+
+        <div className="relative z-10">
+          <div className="flex items-center gap-2 mb-5">
+            <div className="size-8 rounded-md bg-gradient-to-br from-[hsl(250_80%_62%/0.25)] to-transparent border border-zinc-800 flex items-center justify-center text-[hsl(250_80%_80%)]">
+              <Rocket className="size-4" />
+            </div>
+            <div>
+              <div className="text-[10px] uppercase tracking-[0.2em] text-zinc-500">
+                Run a campaign
+              </div>
+              <div className="text-sm font-semibold text-zinc-100">
+                One click · Pick → Generate → Outlook → Send
+              </div>
+            </div>
           </div>
-          <div className="text-xs text-zinc-500">
-            Steps 2–4 operate on this file. Step 1 creates a new one.
+
+          {/* Inputs */}
+          <div className="grid grid-cols-1 md:grid-cols-[2fr_1fr_1fr_1.2fr] gap-3">
+            <Field label="Industry">
+              <Select
+                value={industry || "__none"}
+                onValueChange={(v) => {
+                  const picked = v === "__none" ? "" : v
+                  setIndustry(picked)
+                  // Auto-sync tier to whatever tier the chosen industry belongs to
+                  const row = (industries || []).find((i) => i.industry === picked)
+                  if (row?.tier) setTier(String(row.tier))
+                  else setTier("")
+                }}
+              >
+                <SelectTrigger className="!w-full bg-zinc-900/60 border-zinc-800 h-10">
+                  <SelectValue placeholder="Choose an industry…" />
+                </SelectTrigger>
+                <SelectContent className="max-h-[320px]">
+                  {(industries || []).map((i) => (
+                    <SelectItem key={i.industry} value={i.industry}>
+                      <span className="inline-flex items-center gap-2">
+                        <span>{i.industry}</span>
+                        <span className="text-zinc-500 text-xs">
+                          — {fmt(i.available)} available
+                        </span>
+                      </span>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </Field>
+
+            <Field label="Count">
+              <Input
+                type="number"
+                min={1}
+                value={count}
+                onChange={(e) => setCount(Number(e.target.value))}
+                className="bg-zinc-900/60 border-zinc-800 h-10 tnum"
+              />
+            </Field>
+
+            <Field label="Tier">
+              <div className="flex gap-1.5">
+                {[
+                  { v: "", l: "Auto" },
+                  { v: "1", l: "Tier 1" },
+                  { v: "2", l: "Tier 2" },
+                ].map((t) => (
+                  <button
+                    key={t.v || "auto"}
+                    type="button"
+                    onClick={() => setTier(t.v)}
+                    className={cn(
+                      "flex-1 h-10 rounded-md text-xs border transition-colors font-medium",
+                      tier === t.v
+                        ? "border-[hsl(250_80%_62%)] bg-[hsl(250_80%_62%/0.15)] text-[hsl(250_80%_85%)]"
+                        : "border-zinc-800 bg-zinc-900/60 text-zinc-400 hover:text-zinc-200",
+                    )}
+                  >
+                    {t.l}
+                  </button>
+                ))}
+              </div>
+            </Field>
+
+            <Field label="Send mode">
+              <Select
+                value={sendMode}
+                onValueChange={(v) => setSendMode(v as SendMode)}
+              >
+                <SelectTrigger className="!w-full bg-zinc-900/60 border-zinc-800 h-10">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="schedule">
+                    Schedule · wait for window
+                  </SelectItem>
+                  <SelectItem value="now">Send now</SelectItem>
+                  <SelectItem value="draft">
+                    Draft only · stop after Outlook
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+            </Field>
+          </div>
+
+          {/* Inline stat row */}
+          <div className="mt-4 flex flex-wrap items-center gap-2">
+            <QuotaBadge used={used_today} total={daily_quota} />
+            <WindowBadge schedule={schedule} />
+            {selectedIndustry && (
+              <Badge tone="zinc">
+                <span className="text-zinc-500">Available:</span>{" "}
+                <span className="text-zinc-200 tnum">
+                  {fmt(selectedIndustry.available)}
+                </span>
+              </Badge>
+            )}
+            <label className="ml-auto inline-flex items-center gap-2 text-[11px] text-zinc-400 select-none">
+              <input
+                type="checkbox"
+                checked={noJitter}
+                onChange={(e) => setNoJitter(e.target.checked)}
+                className="accent-[hsl(250_80%_62%)]"
+              />
+              No jitter between sends
+            </label>
+          </div>
+
+          {/* Warnings */}
+          {(countExceedsQuota || countExceedsAvailable) && (
+            <div className="mt-3 text-[11px] text-amber-300/90">
+              {countExceedsQuota && (
+                <div>
+                  · Count exceeds today&apos;s quota ({remaining} remaining).
+                </div>
+              )}
+              {countExceedsAvailable && (
+                <div>
+                  · Count exceeds available leads in this industry (
+                  {fmt(selectedIndustry?.available ?? 0)}).
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Run button */}
+          <div className="mt-5 flex items-center justify-end">
+            <Button
+              size="lg"
+              onClick={runPipeline}
+              disabled={!canRun}
+              className={cn(
+                "h-11 px-6 text-sm font-semibold tracking-tight",
+                "bg-[hsl(250_80%_62%)] hover:bg-[hsl(250_80%_58%)] text-white",
+                "shadow-[0_0_20px_-4px_hsl(250_80%_62%/0.6)]",
+                "disabled:opacity-50 disabled:shadow-none",
+              )}
+            >
+              {jobRunning ? "Pipeline running…" : "Run Pipeline"}
+              <ArrowRight className="size-4" />
+            </Button>
           </div>
         </div>
+      </motion.div>
+
+      {/* ===== STATUS BAR + STEPPER ===== */}
+      <motion.div
+        initial={{ opacity: 0, y: 6 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.22, delay: 0.05 }}
+        className="rounded-xl border border-zinc-800/80 bg-[#18181b] overflow-hidden"
+      >
+        {(() => {
+          const doneCount = stageNodes.filter((n) => n.state === "done").length
+          const activeNode = stageNodes.find((n) => n.state === "active")
+          const errorNode = stageNodes.find((n) => n.state === "error")
+          const total = stageNodes.length
+          const pct = Math.round((doneCount / total) * 100)
+          const currentLabel = errorNode
+            ? `Error at ${errorNode.label}`
+            : activeNode
+              ? `Working: ${activeNode.label}`
+              : doneCount === total && job?.status === "done"
+                ? "Pipeline complete"
+                : job?.status === "running"
+                  ? "Starting..."
+                  : "Idle — configure above and click Run"
+          const barColor = errorNode
+            ? "bg-rose-500"
+            : doneCount === total && job?.status === "done"
+              ? "bg-emerald-500"
+              : "bg-[hsl(250_80%_62%)]"
+          return (
+            <>
+              <div className="flex items-center justify-between px-5 pt-4 pb-2">
+                <div className="flex items-center gap-2">
+                  <div
+                    className={cn(
+                      "size-2 rounded-full",
+                      errorNode
+                        ? "bg-rose-400"
+                        : activeNode
+                          ? "bg-[hsl(250_80%_62%)] animate-pulse"
+                          : doneCount === total && job?.status === "done"
+                            ? "bg-emerald-400"
+                            : "bg-zinc-600",
+                    )}
+                  />
+                  <span className="text-sm font-medium text-zinc-200">
+                    {currentLabel}
+                  </span>
+                </div>
+                <span className="text-xs text-zinc-500 tnum">
+                  {doneCount} / {total} stages · {pct}%
+                </span>
+              </div>
+              <div className="h-1 bg-zinc-800/70">
+                <motion.div
+                  initial={{ width: 0 }}
+                  animate={{ width: `${pct}%` }}
+                  transition={{ duration: 0.4, ease: "easeOut" }}
+                  className={cn("h-full", barColor)}
+                />
+              </div>
+              <div className="px-5 py-6">
+                <Stepper nodes={stageNodes} />
+              </div>
+            </>
+          )
+        })()}
+      </motion.div>
+
+      {/* ===== TERMINAL ===== */}
+      <motion.div
+        initial={{ opacity: 0, y: 6 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.22, delay: 0.09 }}
+        className="rounded-xl border border-zinc-800/80 bg-[#18181b] p-4"
+      >
+        <div className="flex items-center justify-between mb-2">
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] uppercase tracking-[0.15em] text-zinc-500">
+              {secondaryLabel ? secondaryLabel : "Pipeline"} · live logs
+            </span>
+            {job?.status && <StatusChip value={job.status} />}
+          </div>
+          <div className="text-[11px] text-zinc-600 font-mono truncate max-w-[60%]">
+            {displayedJobId || "no job yet"}
+          </div>
+        </div>
+        <Terminal
+          logs={job?.logs || ""}
+          status={job?.status}
+          label={job?.label || "pipeline.log"}
+          height={400}
+        />
+      </motion.div>
+
+      {/* ===== SECONDARY FOOTER ===== */}
+      <div className="flex flex-wrap items-center justify-end gap-2">
+        <Button
+          onClick={() => runSecondary("/api/actions/sync-sent", "Sync Outlook Sent")}
+          disabled={jobRunning}
+          size="sm"
+          variant="outline"
+          className="border-zinc-800 bg-zinc-900/40 hover:bg-zinc-900"
+        >
+          <MailCheck className="size-3.5" />
+          Sync Outlook Sent
+        </Button>
+        <Button
+          onClick={() => runSecondary("/api/actions/scan-replies", "Scan Inbox replies")}
+          disabled={jobRunning}
+          size="sm"
+          variant="outline"
+          className="border-zinc-800 bg-zinc-900/40 hover:bg-zinc-900"
+        >
+          <Inbox className="size-3.5" />
+          Scan Inbox replies
+        </Button>
       </div>
-
-      {/* Steps grid */}
-      <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-        {STEPS.map((s, i) => (
-          <StepCard
-            key={s.key}
-            step={s}
-            index={i}
-            jobId={jobs[s.key]}
-          >
-            {s.key === "pick" && (
-              <div className="grid grid-cols-2 gap-2.5">
-                <div className="col-span-2">
-                  <Label>Industry</Label>
-                  <Select
-                    value={pickForm.industry || "__none"}
-                    onValueChange={(v) =>
-                      setPickForm((f) => ({ ...f, industry: v === "__none" ? "" : v }))
-                    }
-                  >
-                    <SelectTrigger className="!w-full bg-zinc-900/40 border-zinc-800">
-                      <SelectValue placeholder="Pick industry…" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {(industries || []).map((i) => (
-                        <SelectItem key={i.industry} value={i.industry}>
-                          {i.industry}
-                          <span className="text-zinc-500 ml-2 text-xs">
-                            {fmt(i.available)} avail
-                          </span>
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div>
-                  <Label>Count</Label>
-                  <Input
-                    type="number"
-                    min={1}
-                    value={pickForm.count}
-                    onChange={(e) =>
-                      setPickForm((f) => ({ ...f, count: Number(e.target.value) }))
-                    }
-                    className="bg-zinc-900/40 border-zinc-800"
-                  />
-                </div>
-                <div>
-                  <Label>Tier (opt)</Label>
-                  <Select
-                    value={pickForm.tier || "__any"}
-                    onValueChange={(v) =>
-                      setPickForm((f) => ({ ...f, tier: v === "__any" ? "" : v }))
-                    }
-                  >
-                    <SelectTrigger className="!w-full bg-zinc-900/40 border-zinc-800">
-                      <SelectValue placeholder="Any" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="__any">Any tier</SelectItem>
-                      <SelectItem value="1">Tier 1</SelectItem>
-                      <SelectItem value="2">Tier 2</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="col-span-2">
-                  <Label>City (opt)</Label>
-                  <Input
-                    value={pickForm.city}
-                    onChange={(e) =>
-                      setPickForm((f) => ({ ...f, city: e.target.value }))
-                    }
-                    placeholder="e.g. Berlin"
-                    className="bg-zinc-900/40 border-zinc-800"
-                  />
-                </div>
-                <div className="col-span-2 flex justify-end">
-                  <RunButton onClick={runPick} />
-                </div>
-              </div>
-            )}
-
-            {s.key === "drafts" && (
-              <div className="grid grid-cols-2 gap-2.5">
-                <div className="col-span-2">
-                  <Label>Batch file</Label>
-                  <Input
-                    value={selectedFile}
-                    readOnly
-                    className="bg-zinc-900/40 border-zinc-800 font-mono text-xs"
-                  />
-                </div>
-                <div>
-                  <Label>Limit (0 = all)</Label>
-                  <Input
-                    type="number"
-                    min={0}
-                    value={draftLimit}
-                    onChange={(e) => setDraftLimit(Number(e.target.value))}
-                    className="bg-zinc-900/40 border-zinc-800"
-                  />
-                </div>
-                <div className="col-span-2 flex justify-end">
-                  <RunButton onClick={runDrafts} />
-                </div>
-              </div>
-            )}
-
-            {s.key === "outlook" && (
-              <div className="grid grid-cols-1 gap-2.5">
-                <div>
-                  <Label>Batch file</Label>
-                  <Input
-                    value={selectedFile}
-                    readOnly
-                    className="bg-zinc-900/40 border-zinc-800 font-mono text-xs"
-                  />
-                </div>
-                <div className="text-xs text-zinc-500">
-                  Drafts will appear in Outlook → Drafts, ready for a final human review.
-                </div>
-                <div className="flex justify-end">
-                  <RunButton onClick={runOutlook} />
-                </div>
-              </div>
-            )}
-
-            {s.key === "send" && (
-              <div className="grid grid-cols-2 gap-2.5">
-                <div className="col-span-2">
-                  <Label>Batch file</Label>
-                  <Input
-                    value={selectedFile}
-                    readOnly
-                    className="bg-zinc-900/40 border-zinc-800 font-mono text-xs"
-                  />
-                </div>
-                <div>
-                  <Label>Count to send</Label>
-                  <Input
-                    type="number"
-                    min={1}
-                    max={remaining || undefined}
-                    value={sendCount}
-                    onChange={(e) => setSendCount(Number(e.target.value))}
-                    className="bg-zinc-900/40 border-zinc-800"
-                  />
-                </div>
-                <div className="flex items-end">
-                  <label className="inline-flex items-center gap-2 text-xs text-zinc-400 select-none">
-                    <input
-                      type="checkbox"
-                      checked={noJitter}
-                      onChange={(e) => setNoJitter(e.target.checked)}
-                      className="accent-[hsl(250_80%_62%)]"
-                    />
-                    No jitter delay
-                  </label>
-                </div>
-                <div className="col-span-2 flex items-center justify-between gap-3">
-                  <div className="text-[11px] text-amber-400/90">
-                    This will send real emails.
-                  </div>
-                  <Button
-                    size="sm"
-                    onClick={() => setConfirmSend(true)}
-                    className="bg-[hsl(250_80%_62%)] hover:bg-[hsl(250_80%_58%)] text-white"
-                  >
-                    <Send className="size-3.5" />
-                    Send now
-                  </Button>
-                </div>
-              </div>
-            )}
-
-            {s.key === "sync" && (
-              <div className="space-y-2.5">
-                <div className="text-xs text-zinc-400">
-                  Pulls sent items from Outlook into the database and scans the inbox for replies.
-                  Safe to run anytime.
-                </div>
-                <div className="flex justify-end">
-                  <RunButton onClick={runSync} label="Sync & scan" />
-                </div>
-              </div>
-            )}
-          </StepCard>
-        ))}
-      </div>
-
-      <Dialog open={confirmSend} onOpenChange={setConfirmSend}>
-        <DialogContent className="bg-[#18181b] border-zinc-800">
-          <DialogHeader>
-            <DialogTitle className="text-zinc-100">Send {sendCount} real emails?</DialogTitle>
-            <DialogDescription className="text-zinc-400">
-              Emails will be sent from{" "}
-              <span className="font-mono text-xs text-zinc-300">jaydip@bitcodingsolutions.com</span>{" "}
-              via Outlook SMTP. You have{" "}
-              <span className="text-zinc-200 tnum font-medium">{fmt(remaining)}</span> in today&apos;s
-              safety quota. This action can&apos;t be undone.
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setConfirmSend(false)}>
-              Cancel
-            </Button>
-            <Button
-              onClick={runSend}
-              className="bg-[hsl(250_80%_62%)] hover:bg-[hsl(250_80%_58%)] text-white"
-            >
-              <Send className="size-3.5" />
-              Send {sendCount}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
     </div>
   )
 }
 
-function Label({ children }: { children: React.ReactNode }) {
+// ---------------- Small widgets ----------------
+
+function Field({
+  label,
+  children,
+}: {
+  label: string
+  children: React.ReactNode
+}) {
   return (
-    <div className="text-[11px] uppercase tracking-[0.12em] text-zinc-500 mb-1.5">
+    <div>
+      <div className="text-[10px] uppercase tracking-[0.15em] text-zinc-500 mb-1.5">
+        {label}
+      </div>
       {children}
     </div>
   )
 }
 
-function RunButton({ onClick, label = "Run" }: { onClick: () => void; label?: string }) {
+function Badge({
+  children,
+  tone = "zinc",
+}: {
+  children: React.ReactNode
+  tone?: "zinc" | "emerald" | "amber"
+}) {
   return (
-    <Button
-      onClick={onClick}
-      size="sm"
-      className="bg-[hsl(250_80%_62%)] hover:bg-[hsl(250_80%_58%)] text-white"
+    <div
+      className={cn(
+        "inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-[11px]",
+        tone === "zinc" && "border-zinc-800 bg-zinc-900/40 text-zinc-300",
+        tone === "emerald" &&
+          "border-emerald-600/40 bg-emerald-500/10 text-emerald-300",
+        tone === "amber" &&
+          "border-amber-600/40 bg-amber-500/10 text-amber-300",
+      )}
     >
-      <Play className="size-3.5" />
-      {label}
-    </Button>
+      {children}
+    </div>
   )
 }
 
-function StepCard({
-  step,
-  index,
-  jobId,
-  children,
+function PendingDraftsBanner({
+  onAction,
+  jobRunning,
 }: {
-  step: Step
-  index: number
-  jobId: string | null
-  children: React.ReactNode
+  onAction: (path: string, label: string) => Promise<void> | void
+  jobRunning: boolean
 }) {
-  const { job } = useJob(jobId)
-  const Icon = step.icon
-  const status = job?.status
+  const { data, mutate } = useSWR<{ count: number }>(
+    "/api/pending-drafts",
+    swrFetcher,
+    { refreshInterval: 15000 },
+  )
+  const count = data?.count ?? 0
+  if (count === 0) return null
+
+  const handleSend = async () => {
+    try {
+      const res = await api.post<{ job_id: string; count: number }>(
+        "/api/actions/send-all-drafts",
+        { mode: "now", no_jitter: false },
+      )
+      toast.success(`Sending ${res.count} drafts`, { description: res.job_id })
+      setTimeout(() => mutate(), 3000)
+    } catch (e) {
+      toast.error(
+        "Send failed",
+        { description: e instanceof Error ? e.message : String(e) },
+      )
+    }
+  }
+
+  const handleClear = async () => {
+    if (!confirm(`Delete ${count} pending drafts from Outlook? (not sent)`)) return
+    try {
+      const res = await api.post<{ deleted_outlook: number }>(
+        "/api/actions/clear-drafts",
+        {},
+      )
+      toast.success(`Cleared ${res.deleted_outlook} drafts`)
+      mutate()
+    } catch (e) {
+      toast.error(
+        "Clear failed",
+        { description: e instanceof Error ? e.message : String(e) },
+      )
+    }
+  }
 
   return (
     <motion.div
-      initial={{ opacity: 0, y: 6 }}
+      initial={{ opacity: 0, y: -4 }}
       animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.2, delay: index * 0.04 }}
-      className={cn(
-        "rounded-xl border bg-[#18181b] transition-colors",
-        status === "running"
-          ? "border-[hsl(250_80%_62%/0.35)] shadow-[0_0_0_1px_hsl(250_80%_62%/0.25)]"
-          : "border-zinc-800/80",
-      )}
+      className="rounded-xl border border-amber-500/40 bg-amber-500/5 px-4 py-3 flex items-center justify-between gap-4"
     >
-      <div className="flex items-start justify-between px-5 pt-5">
-        <div className="flex items-start gap-3">
-          <div className="size-9 rounded-md bg-gradient-to-br from-[hsl(250_80%_62%/0.15)] to-transparent border border-zinc-800/80 flex items-center justify-center text-[hsl(250_80%_78%)]">
-            <Icon className="size-4" />
+      <div className="flex items-center gap-3">
+        <div className="size-8 rounded-md bg-amber-500/15 border border-amber-500/30 flex items-center justify-center">
+          <MailCheck className="size-4 text-amber-400" />
+        </div>
+        <div>
+          <div className="text-sm font-medium text-amber-100">
+            {count} draft{count === 1 ? "" : "s"} pending in Outlook
           </div>
-          <div>
-            <div className="flex items-center gap-2">
-              <span className="text-[10px] uppercase tracking-[0.15em] text-zinc-500 tnum">
-                Step {step.num}
-              </span>
-              {status && <StatusChip value={status} />}
-            </div>
-            <div className="text-sm font-semibold tracking-tight text-zinc-100 mt-0.5">
-              {step.title}
-            </div>
-            <div className="text-xs text-zinc-500">{step.subtitle}</div>
+          <div className="text-xs text-amber-300/70">
+            These are ready to go — send them, or clear them to start fresh.
           </div>
         </div>
       </div>
-      <div className="px-5 py-4">{children}</div>
-      <div className="px-5 pb-5">
-        <Terminal
-          logs={job?.logs || ""}
-          status={status}
-          label={job?.label || `step-${step.num}.log`}
-          height={180}
-        />
+      <div className="flex items-center gap-2">
+        <Button
+          onClick={handleSend}
+          disabled={jobRunning}
+          size="sm"
+          className="bg-[hsl(250_80%_62%)] hover:bg-[hsl(250_80%_58%)] text-white h-8"
+        >
+          Send all
+        </Button>
+        <Button
+          onClick={handleClear}
+          disabled={jobRunning}
+          size="sm"
+          variant="outline"
+          className="border-zinc-800 bg-zinc-900/40 hover:bg-zinc-900 h-8"
+        >
+          Clear
+        </Button>
       </div>
     </motion.div>
   )
+}
+
+function QuotaBadge({ used, total }: { used: number; total: number }) {
+  const pct = total > 0 ? Math.min(100, (used / total) * 100) : 0
+  return (
+    <div className="inline-flex items-center gap-2 rounded-md border border-zinc-800 bg-zinc-900/40 px-2.5 py-1">
+      <span className="text-[10px] uppercase tracking-[0.15em] text-zinc-500">
+        Quota
+      </span>
+      <span className="tnum text-[11px] text-zinc-200 font-medium">
+        {used}
+        <span className="text-zinc-500">/{total}</span>
+      </span>
+      <span className="w-16 h-1 rounded-full bg-zinc-800 overflow-hidden">
+        <span
+          className="block h-full bg-[hsl(250_80%_62%)] transition-all"
+          style={{ width: `${pct}%` }}
+        />
+      </span>
+    </div>
+  )
+}
+
+function WindowBadge({ schedule }: { schedule?: ScheduleInfo }) {
+  if (!schedule) {
+    return <Badge tone="zinc">Window: …</Badge>
+  }
+  const isOpen = !!schedule.in_window
+  return (
+    <div
+      className={cn(
+        "inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-[11px]",
+        isOpen
+          ? "border-emerald-600/40 bg-emerald-500/10 text-emerald-300"
+          : "border-amber-600/40 bg-amber-500/10 text-amber-300",
+      )}
+    >
+      <span
+        className={cn(
+          "size-1.5 rounded-full",
+          isOpen
+            ? "bg-emerald-400 shadow-[0_0_6px_1px_rgba(16,185,129,0.6)]"
+            : "bg-amber-400",
+        )}
+      />
+      <span className="uppercase tracking-[0.12em] text-[10px] opacity-80">
+        Window
+      </span>
+      {isOpen ? (
+        <span>open · closes in {fmtDuration(schedule.seconds_remaining)}</span>
+      ) : (
+        <span>
+          closed · opens in {fmtDuration(schedule.seconds_until_open)}
+        </span>
+      )}
+    </div>
+  )
+}
+
+function fmtDuration(secs?: number): string {
+  if (secs === undefined || secs === null || Number.isNaN(secs)) return "—"
+  const s = Math.max(0, Math.floor(secs))
+  const d = Math.floor(s / 86400)
+  const h = Math.floor((s % 86400) / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  if (d > 0) return `${d}d ${h}h`
+  if (h > 0) return `${h}h ${m}m`
+  return `${m}m`
 }

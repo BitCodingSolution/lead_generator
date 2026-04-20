@@ -73,25 +73,6 @@ def pick(industry=None, tier=None, count=10, city=None, dry_run=False):
         con.close()
         return
 
-    # Mark leads as 'Picked' in status
-    lead_ids = leads_df['lead_id'].tolist()
-    placeholders = ','.join(['?'] * len(lead_ids))
-    con.execute(
-        f"UPDATE lead_status SET status='Picked', updated_at=CURRENT_TIMESTAMP "
-        f"WHERE lead_id IN ({placeholders})",
-        lead_ids,
-    )
-
-    # Log batch
-    con.execute(
-        "INSERT OR REPLACE INTO daily_batches "
-        "(batch_date, leads_picked, drafts_generated, sent_count, replies_count, notes) "
-        "VALUES (?, ?, 0, 0, 0, ?)",
-        (today, len(leads_df), f"industry={industry}, tier={tier}, city={city}"),
-    )
-    con.commit()
-    con.close()
-
     # Add batch columns for downstream scripts
     leads_df['batch_date'] = today
     leads_df['draft_subject'] = ''
@@ -102,9 +83,29 @@ def pick(industry=None, tier=None, count=10, city=None, dry_run=False):
     leads_df['sent_at'] = ''
     leads_df['notes'] = ''
 
+    # Write file FIRST so DB never goes ahead of the on-disk artifact.
+    # If Excel write crashes, leads stay 'New' and pipeline can be retried.
     with pd.ExcelWriter(out_path, engine='xlsxwriter',
                         engine_kwargs={'options': {'strings_to_urls': False}}) as w:
         leads_df.to_excel(w, sheet_name='Batch', index=False)
+
+    # Now commit DB state in one transaction
+    lead_ids = leads_df['lead_id'].tolist()
+    placeholders = ','.join(['?'] * len(lead_ids))
+    con.execute(
+        f"UPDATE lead_status SET status='Picked', updated_at=CURRENT_TIMESTAMP "
+        f"WHERE lead_id IN ({placeholders})",
+        lead_ids,
+    )
+    con.execute(
+        "INSERT OR REPLACE INTO daily_batches "
+        "(batch_date, leads_picked, drafts_generated, sent_count, replies_count, notes) "
+        "VALUES (?, ?, 0, 0, 0, ?)",
+        (today, len(leads_df), f"industry={industry}, tier={tier}, city={city}"),
+    )
+    con.commit()
+    con.close()
+
     print(f"\n[OK] Batch file: {out_path}")
     print(f"     Status updated: {len(leads_df)} leads -> 'Picked'")
     print(f"     Next: run generate_drafts.py --file '{out_path}'")

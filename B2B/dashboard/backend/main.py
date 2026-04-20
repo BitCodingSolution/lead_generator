@@ -27,6 +27,9 @@ SCRIPTS = BASE / "scripts"
 BATCHES_DIR = BASE / "Database" / "Marcel Data" / "01_Daily_Batches"
 PY = sys.executable
 
+DAILY_QUOTA = 25
+JOB_RETENTION_SECONDS = 3600  # evict finished jobs older than 1h
+
 app = FastAPI(title="BitCoding B2B Outreach API", version="1.0")
 app.add_middleware(
     CORSMiddleware,
@@ -91,6 +94,34 @@ def run_script_job(job_id: str, argv: list[str]):
     except Exception as e:
         JOBS[job_id]["status"] = "error"
         JOBS[job_id]["error"] = str(e)
+    finally:
+        JOBS[job_id]["ended_at"] = dt.datetime.now().isoformat(timespec="seconds")
+        _evict_old_jobs()
+
+
+def _evict_old_jobs():
+    """Drop finished jobs older than JOB_RETENTION_SECONDS to bound memory."""
+    now = dt.datetime.now()
+    for jid in list(JOBS.keys()):
+        j = JOBS[jid]
+        if j.get("status") in ("done", "error"):
+            ended = j.get("ended_at")
+            if not ended:
+                continue
+            try:
+                age = (now - dt.datetime.fromisoformat(ended)).total_seconds()
+            except Exception:
+                continue
+            if age > JOB_RETENTION_SECONDS:
+                JOBS.pop(jid, None)
+
+
+def _pipeline_running() -> bool:
+    return any(
+        j.get("status") in ("queued", "running")
+        and str(j.get("label", "")).startswith("Pipeline:")
+        for j in JOBS.values()
+    )
 
 
 def start_job(argv: list[str], label: str) -> str:
@@ -153,8 +184,8 @@ def stats():
         ),
         "reply_rate_pct": round(reply_rate, 2),
         "positive_rate_pct": round(positive_rate, 2),
-        "daily_quota": 25,
-        "remaining_today": max(0, 25 - q_one(
+        "daily_quota": DAILY_QUOTA,
+        "remaining_today": max(0, DAILY_QUOTA - q_one(
             "SELECT COUNT(*) FROM emails_sent WHERE DATE(sent_at)=?", today
         )),
     }
@@ -349,6 +380,58 @@ def write_outlook(body: BatchFileBody):
     return {"job_id": start_job(argv, f"Write to Outlook: {body.file}")}
 
 
+class RunPipelineBody(BaseModel):
+    industry: str
+    count: int
+    tier: Optional[int] = None
+    send_mode: str = "schedule"  # "now" | "schedule" | "draft"
+    no_jitter: bool = False
+
+
+@app.post("/api/actions/run-pipeline")
+def run_pipeline(body: RunPipelineBody):
+    """Orchestrate the whole flow in one job: pick -> generate -> Outlook -> (send/schedule/draft)."""
+    if body.send_mode not in ("now", "schedule", "draft"):
+        raise HTTPException(400, "send_mode must be now/schedule/draft")
+    if body.count <= 0:
+        raise HTTPException(400, "count must be > 0")
+    # Concurrency guard: only one pipeline at a time
+    if _pipeline_running():
+        raise HTTPException(409, "Another pipeline is already running")
+    # Server-side quota enforcement for 'now' mode (schedule/draft don't send today)
+    if body.send_mode == "now":
+        today = dt.date.today().isoformat()
+        sent_today = q_one(
+            "SELECT COUNT(*) FROM emails_sent WHERE DATE(sent_at)=?", today
+        )
+        remaining = max(0, DAILY_QUOTA - sent_today)
+        if body.count > remaining:
+            raise HTTPException(
+                400,
+                f"Daily quota exceeded: {body.count} requested, {remaining} left today",
+            )
+    argv = [PY, str(SCRIPTS / "run_pipeline.py"),
+            "--industry", body.industry,
+            "--count", str(body.count),
+            "--send-mode", body.send_mode]
+    if body.tier:
+        argv += ["--tier", str(body.tier)]
+    if body.no_jitter:
+        argv.append("--no-jitter")
+    label = f"Pipeline: {body.industry} x {body.count} ({body.send_mode})"
+    return {"job_id": start_job(argv, label)}
+
+
+@app.post("/api/actions/generate-and-push")
+def generate_and_push(body: BatchFileBody):
+    """Run generate_drafts then write_to_outlook in one job (skip manual step 3)."""
+    path = resolve_batch(body.file)
+    argv = [PY, str(SCRIPTS / "generate_and_push.py"), "--file", path]
+    if body.limit:
+        argv += ["--limit", str(body.limit)]
+    return {"job_id": start_job(argv, f"Generate+push: {body.file}")}
+
+
 class SendBody(BaseModel):
     file: str
     count: int
@@ -381,6 +464,137 @@ def queue_followups(body: FollowupBody):
     return {"job_id": start_job(argv, f"Queue touch-{body.touch} follow-ups (Day-{body.days})")}
 
 
+@app.get("/api/pending-drafts")
+def pending_drafts():
+    """Drafts in Outlook that haven't been sent yet (DB view)."""
+    rows = q_all("""
+        SELECT e.id, e.lead_id, e.subject, l.name, l.company, l.email,
+               l.industry, l.city, e.batch_date
+        FROM emails_sent e
+        JOIN leads l ON e.lead_id = l.lead_id
+        WHERE e.sent_at IS NULL AND e.outlook_entry_id IS NOT NULL
+        ORDER BY e.id DESC
+    """)
+    return {"count": len(rows), "items": rows}
+
+
+class SendAllDraftsBody(BaseModel):
+    mode: str = "schedule"  # "now" | "schedule"
+    no_jitter: bool = False
+
+
+@app.post("/api/actions/send-all-drafts")
+def send_all_drafts(body: SendAllDraftsBody):
+    """Send every pending draft in Outlook, regardless of source batch file.
+
+    Uses DB as source of truth (send_pending.py) so drafts from any batch
+    are covered. Schedule mode still gates via send_scheduler, which then
+    delegates to send_pending with no --file.
+    """
+    total_pending = q_one(
+        "SELECT COUNT(*) FROM emails_sent WHERE sent_at IS NULL AND outlook_entry_id IS NOT NULL"
+    )
+    if not total_pending:
+        raise HTTPException(400, "No pending drafts to send")
+    if body.mode == "now":
+        argv = [PY, str(SCRIPTS / "send_pending.py")]
+        if body.no_jitter:
+            argv.append("--no-jitter")
+        label = f"Send all {total_pending} pending drafts (now)"
+    else:
+        argv = [PY, str(SCRIPTS / "send_scheduler.py"), "--wait-and-send-pending"]
+        if body.no_jitter:
+            argv.append("--no-jitter")
+        label = f"Send all {total_pending} pending drafts (scheduled)"
+    return {"job_id": start_job(argv, label), "count": total_pending}
+
+
+@app.post("/api/actions/clear-drafts")
+def clear_drafts():
+    """Delete all pending drafts from Outlook + reset DB state."""
+    import win32com.client
+    outlook = win32com.client.Dispatch("Outlook.Application")
+    acc = None
+    for a in outlook.Session.Accounts:
+        if a.SmtpAddress.lower() == "pradip@bitcodingsolutions.com":
+            acc = a; break
+    if not acc:
+        raise HTTPException(500, "pradip@ account not found in Outlook")
+    folder = acc.DeliveryStore.GetDefaultFolder(16)
+    deleted = 0
+    for it in list(folder.Items):
+        try:
+            it.Delete(); deleted += 1
+        except Exception:
+            pass
+    c = conn()
+    try:
+        reset_db = c.execute(
+            "DELETE FROM emails_sent WHERE sent_at IS NULL"
+        ).rowcount
+        reset_status = c.execute(
+            "UPDATE lead_status SET status='New', touch_count=0, first_sent_at=NULL, "
+            "last_touch_date=NULL, updated_at=CURRENT_TIMESTAMP "
+            "WHERE status IN ('Picked','Drafted','DraftedInOutlook')"
+        ).rowcount
+        c.commit()
+    finally:
+        c.close()
+    return {"deleted_outlook": deleted, "reset_db_rows": reset_db,
+            "reset_lead_status": reset_status}
+
+
+@app.get("/api/schedule")
+def schedule_status():
+    """Return current send-window status for Germany business hours."""
+    from zoneinfo import ZoneInfo
+    TZ = ZoneInfo('Europe/Berlin')
+    t = dt.datetime.now(TZ)
+    allowed = {1, 2, 3}  # Tue/Wed/Thu
+    in_window = (t.weekday() in allowed
+                 and ((t.hour > 10) or (t.hour == 10 and t.minute >= 0))
+                 and ((t.hour < 11) or (t.hour == 11 and t.minute < 30)))
+    if in_window:
+        end = t.replace(hour=11, minute=30, second=0, microsecond=0)
+        return {
+            "in_window": True,
+            "now_local": t.isoformat(timespec='seconds'),
+            "window_closes_at": end.isoformat(timespec='seconds'),
+            "seconds_remaining": int((end - t).total_seconds()),
+        }
+    # next window
+    cand = t.replace(hour=10, minute=0, second=0, microsecond=0)
+    if t >= cand:
+        cand += dt.timedelta(days=1)
+    while cand.weekday() not in allowed:
+        cand += dt.timedelta(days=1)
+    return {
+        "in_window": False,
+        "now_local": t.isoformat(timespec='seconds'),
+        "next_window_opens_at": cand.isoformat(timespec='seconds'),
+        "seconds_until_open": int((cand - t).total_seconds()),
+    }
+
+
+class ScheduledSendBody(BaseModel):
+    file: str
+    count: int
+    no_jitter: bool = False
+    wait: bool = False  # if True, script blocks until window opens
+
+
+@app.post("/api/actions/scheduled-send")
+def scheduled_send(body: ScheduledSendBody):
+    path = resolve_batch(body.file)
+    flag = "--wait-and-send" if body.wait else "--send-if-window"
+    argv = [PY, str(SCRIPTS / "send_scheduler.py"), flag,
+            "--file", path, "--count", str(body.count)]
+    if body.no_jitter:
+        argv.append("--no-jitter")
+    label = f"{'Wait+send' if body.wait else 'Send-if-window'} {body.count} from {body.file}"
+    return {"job_id": start_job(argv, label)}
+
+
 @app.post("/api/actions/sync-sent")
 def sync_sent():
     argv = [PY, str(SCRIPTS / "mark_sent.py")]
@@ -405,6 +619,48 @@ def batch_files():
             "modified": dt.datetime.fromtimestamp(f.stat().st_mtime).isoformat(timespec="seconds"),
         })
     return out
+
+
+@app.get("/api/batches/progress")
+def batch_progress(file: str):
+    """Per-batch counts from the xlsx + DB (DB is the source of truth)."""
+    path = resolve_batch(file)
+    import pandas as pd
+    df = pd.read_excel(path)
+    total = len(df)
+    lead_ids = df['lead_id'].dropna().astype(str).tolist()
+    if not lead_ids:
+        return {"file": file, "total": total, "drafted": 0, "in_outlook": 0, "sent": 0,
+                "pending_draft": total, "pending_outlook": 0, "pending_send": 0}
+    placeholders = ",".join(["?"] * len(lead_ids))
+    c = conn()
+    try:
+        drafted = c.execute(
+            f"SELECT COUNT(DISTINCT lead_id) FROM emails_sent WHERE lead_id IN ({placeholders})",
+            lead_ids,
+        ).fetchone()[0]
+        in_outlook = c.execute(
+            f"SELECT COUNT(DISTINCT lead_id) FROM emails_sent "
+            f"WHERE lead_id IN ({placeholders}) AND outlook_entry_id IS NOT NULL",
+            lead_ids,
+        ).fetchone()[0]
+        sent = c.execute(
+            f"SELECT COUNT(DISTINCT lead_id) FROM emails_sent "
+            f"WHERE lead_id IN ({placeholders}) AND sent_at IS NOT NULL",
+            lead_ids,
+        ).fetchone()[0]
+    finally:
+        c.close()
+    return {
+        "file": file,
+        "total": total,
+        "drafted": drafted,
+        "in_outlook": in_outlook,
+        "sent": sent,
+        "pending_draft": total - drafted,
+        "pending_outlook": drafted - in_outlook,
+        "pending_send": in_outlook - sent,
+    }
 
 
 # ---- Job status ----
@@ -443,3 +699,51 @@ def handle_reply(body: HandleReplyBody):
 @app.get("/api/health")
 def health():
     return {"ok": True, "db": DB, "time": dt.datetime.now().isoformat()}
+
+
+BRIDGE_DIR = Path(r"H:/Lead Generator/Bridge")
+
+
+def _ping_bridge(timeout: float = 1.5) -> bool:
+    import urllib.error
+    import urllib.request
+    try:
+        req = urllib.request.Request("http://127.0.0.1:8765/", method="GET")
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return 200 <= r.status < 500
+    except urllib.error.HTTPError as e:
+        return e.code < 500  # any response means server is up
+    except Exception:
+        return False
+
+
+@app.get("/api/bridge-health")
+def bridge_health():
+    """Ping the local Claude bridge (localhost:8765). Used for header indicator."""
+    return {"ok": _ping_bridge()}
+
+
+@app.post("/api/actions/start-bridge")
+def start_bridge():
+    """Launch the bridge in background via start-silent.vbs, then poll health."""
+    import time
+    if _ping_bridge():
+        return {"started": False, "already_running": True, "ok": True}
+    vbs = BRIDGE_DIR / "start-silent.vbs"
+    if not vbs.exists():
+        raise HTTPException(500, f"Bridge launcher not found: {vbs}")
+    try:
+        subprocess.Popen(
+            ["wscript.exe", str(vbs)],
+            cwd=str(BRIDGE_DIR),
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except Exception as e:
+        raise HTTPException(500, f"Failed to launch bridge: {e}")
+    # Poll up to ~6s for the server to bind
+    for _ in range(12):
+        time.sleep(0.5)
+        if _ping_bridge(timeout=1.0):
+            return {"started": True, "already_running": False, "ok": True}
+    return {"started": True, "already_running": False, "ok": False,
+            "hint": "Launched but not responding yet; check Bridge/bridge.log"}

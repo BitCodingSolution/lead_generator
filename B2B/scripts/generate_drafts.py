@@ -167,46 +167,6 @@ AUSGABE (strict): nur JSON, kein Markdown, kein Code-Block.
 Im body: "\\n\\n" zwischen Anrede und dem Rest. Bei längeren Emails "\\n\\n" zwischen Absätzen.
 """
 
-_OLD_PROMPT_UNUSED = """
-ABSOLUTE VERBOTE (jede Verletzung zerstört die Email):
-1. KEIN Gedankenstrich. Weder em-dash (—) noch en-dash (–). Benutze stattdessen Komma, Punkt oder Doppelpunkt. Auch nicht im Subject.
-2. KEINE Standardfloskeln: kein "Ich hoffe, es geht Ihnen gut", kein "Darf ich mich kurz vorstellen", kein "ich möchte Ihnen gerne mitteilen".
-3. KEINE Buzzwords: kein "revolutionär", "bahnbrechend", "innovativ", "disruptiv", "State-of-the-Art", "zukunftsweisend".
-4. KEINE Parallelstrukturen (drei Begriffe mit "und" verkettet, z.B. "effizient, schnell und zuverlässig").
-5. KEIN Markenspam: BitCoding wird EINMAL erwähnt, beiläufig, nicht als Pitch.
-6. KEINE Signatur im Body (kommt separat angefügt).
-
-STIL (so klingt ein Mensch):
-- Mische kurze Sätze (4-8 Wörter) mit mittleren (12-18 Wörter). Keine Gleichförmigkeit.
-- Benutze natürliche Wendungen: "Kurze Frage", "Bin zufällig auf [Company] gestoßen", "Falls das passt", "Sagt Ihnen das was", "Nebenbei".
-- Ok, lockerer Ton im Rahmen von "Sehr geehrter Herr X". Nicht steif, nicht künstlich höflich.
-- Wenn Referenz genannt wird: eine Zahl, beiläufig eingewoben, kein Werbeblock.
-
-STRUKTUR (flexibel, nicht stur):
-1. Anrede: "Sehr geehrter Herr [Nachname]," oder "Sehr geehrte Frau [Nachname]," (basierend auf Salutation).
-2. Opener (1 Satz): EIN konkreter Bezug zur Firma/Stadt/Sub-Industry. VARIIEREN: mal als Beobachtung, mal als Frage, mal als Kontext. NICHT immer mit "Wir sind BitCoding" starten.
-3. Mittelteil (1-2 Sätze): kurzer Hinweis, dass BitCoding (30+ Entwickler, seit 2018) individuelle Software und Automationen nach KUNDENANFORDERUNG baut. Keine vorgeschlagene Feature-Idee. Optional: ein einziger kurzer Halbsatz, dass wir auch Erfahrung in der Branche haben (nur wenn wirklich passend).
-4. Soft CTA (1 Satz): kurze Frage, nicht "15-Minuten-Gespräch" jedes Mal, variieren. Z.B. "wäre ein kurzer Austausch sinnvoll?", "lohnt es sich, das mal anzuschauen?", "hätten Sie Interesse, darüber zu reden?".
-
-Gesamtlänge: 60 bis 90 Wörter. Nicht länger.
-
-SUBJECT LINE (sehr wichtig):
-- Max. 55 Zeichen.
-- MUSS für JEDEN Lead ANDERS sein. Nimm niemals dasselbe Subject wie vorher in dieser Batch.
-- VARIIEREN zwischen diesen Mustern (zufällig wählen):
-  (a) Konkrete Frage: "Frage zu [Firmenspezifisches]"
-  (b) Beobachtung: "[Branche] in [Stadt]"
-  (c) Nutzen-Hinweis: "[Spezifische Aufgabe] vereinfachen"
-  (d) Persönlich: "Kurz zu [Firmenname]"
-  (e) Direkt: "[Detail] bei [Firmenname]?"
-- KEINE Ausrufezeichen. KEINE Großbuchstaben-Wörter. KEINE Gedankenstriche.
-
-AUSGABEFORMAT (strict, nur JSON):
-{"subject": "...", "body": "..."}
-
-Im body: zwischen Anrede und Rest, und zwischen Absaetzen.
-"""  # end unused
-
 
 def german_salutation(row):
     sal = (row.get('salutation') or '').strip().lower()
@@ -497,10 +457,15 @@ def main():
         sys.exit(1)
 
     full_df = pd.read_excel(args.file)
-    # Process subset but save the full df back to preserve all rows
-    df = full_df.head(args.limit) if args.limit else full_df
+    # Only consider rows that don't already have a draft
+    no_draft_mask = (full_df['draft_subject'].isna() |
+                     (full_df['draft_subject'].astype(str).str.strip() == ''))
+    remaining = full_df[no_draft_mask]
+    df = remaining.head(args.limit) if args.limit else remaining
 
-    print(f"Generating drafts for {len(df)} leads (of {len(full_df)} total)...")
+    already_drafted = len(full_df) - len(remaining)
+    print(f"Batch: {len(full_df)} total | {already_drafted} already drafted | "
+          f"{len(remaining)} remaining | processing {len(df)} now.")
     con = sqlite3.connect(DB)
 
     # Collect already-used subjects from this batch to enforce variety
@@ -513,10 +478,6 @@ def main():
     batch_index_counter = 0
     for i, row in df.iterrows():
         lead_id = row['lead_id']
-        already = row.get('draft_subject') or ''
-        if already and not pd.isna(already) and str(already).strip():
-            print(f"  [{i+1}/{len(df)}] {lead_id} already drafted, skipping")
-            continue
 
         touch_num = int(row.get('touch_number', 1) or 1)
         if touch_num == 2:
