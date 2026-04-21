@@ -11,13 +11,7 @@ import {
   Database,
   Briefcase,
   Inbox,
-  Mail,
-  Send,
-  Trash2,
   Settings,
-  Ban,
-  Clock,
-  FileText,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 
@@ -48,12 +42,6 @@ const SECTIONS: NavSection[] = [
     items: [
       { href: "/linkedin", label: "Overview", icon: Briefcase },
       { href: "/linkedin/leads", label: "Leads", icon: Inbox },
-      { href: "/linkedin/drafts", label: "Drafts", icon: Mail },
-      { href: "/linkedin/sent", label: "Sent & Replies", icon: Send },
-      { href: "/linkedin/follow-ups", label: "Follow-ups", icon: Clock },
-      { href: "/linkedin/recyclebin", label: "Recyclebin", icon: Trash2 },
-      { href: "/linkedin/blocklist", label: "Blocklist", icon: Ban },
-      { href: "/linkedin/cvs", label: "CV library", icon: FileText },
       { href: "/linkedin/analytics", label: "Analytics", icon: BarChart3 },
       { href: "/linkedin/settings", label: "Settings", icon: Settings },
     ],
