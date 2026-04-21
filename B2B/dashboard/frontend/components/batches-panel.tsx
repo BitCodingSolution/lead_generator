@@ -10,7 +10,7 @@ import type {
 } from "@/lib/sources"
 import type { Job } from "@/lib/types"
 import { Button } from "@/components/ui/button"
-import { CheckCircle2, X as XIcon } from "lucide-react"
+import { Archive, CheckCircle2, RotateCcw, X as XIcon } from "lucide-react"
 import { fmt, relTime, cn } from "@/lib/utils"
 
 // ---- Types ----
@@ -28,6 +28,49 @@ const STATE_META: Record<
   drafted: { label: "Drafts ready", tone: "violet" },
   in_outlook: { label: "In Outlook", tone: "blue" },
   sent: { label: "Sent", tone: "emerald" },
+}
+
+// ---- Manual archive (user-controlled, persisted in localStorage) ----
+const DISMISSED_KEY = "batches-panel.dismissed"
+
+function useDismissedBatches() {
+  const [dismissed, setDismissed] = React.useState<Set<string>>(() => {
+    if (typeof window === "undefined") return new Set()
+    try {
+      const raw = window.localStorage.getItem(DISMISSED_KEY)
+      return new Set<string>(raw ? JSON.parse(raw) : [])
+    } catch {
+      return new Set<string>()
+    }
+  })
+  const persist = React.useCallback((next: Set<string>) => {
+    setDismissed(next)
+    try {
+      window.localStorage.setItem(
+        DISMISSED_KEY,
+        JSON.stringify(Array.from(next)),
+      )
+    } catch {
+      /* ignore quota errors */
+    }
+  }, [])
+  const dismiss = React.useCallback(
+    (name: string) => {
+      const next = new Set(dismissed)
+      next.add(name)
+      persist(next)
+    },
+    [dismissed, persist],
+  )
+  const restore = React.useCallback(
+    (name: string) => {
+      const next = new Set(dismissed)
+      next.delete(name)
+      persist(next)
+    },
+    [dismissed, persist],
+  )
+  return { dismissed, dismiss, restore }
 }
 
 // ---- Summary ----
@@ -112,18 +155,23 @@ export function BatchesPanel({
     CampaignBatchesResponse | CrossResponse
   >(url, swrFetcher, { refreshInterval: 5000 })
 
-  // "Archive" = fully sent OR stale (>7 days old). Hidden by default so the
-  // list shows only things worth acting on today. Summary cards stay lifetime.
+  // "Archive" = fully sent OR stale (>7 days) OR user-dismissed.
+  // Hidden by default; summary cards stay lifetime.
   const [showArchive, setShowArchive] = React.useState(false)
   const STALE_DAYS = 7
+  const { dismissed, dismiss, restore } = useDismissedBatches()
 
-  const isArchived = React.useCallback((b: CampaignBatch) => {
-    if (b.state === "sent") return true
-    const created = b.created_at ? Date.parse(b.created_at) : 0
-    if (!created) return false
-    const ageDays = (Date.now() - created) / 86400000
-    return ageDays > STALE_DAYS
-  }, [])
+  const isArchived = React.useCallback(
+    (b: CampaignBatch) => {
+      if (dismissed.has(b.name)) return true
+      if (b.state === "sent") return true
+      const created = b.created_at ? Date.parse(b.created_at) : 0
+      if (!created) return false
+      const ageDays = (Date.now() - created) / 86400000
+      return ageDays > STALE_DAYS
+    },
+    [dismissed],
+  )
 
   const allMatchingSource = (data?.batches || []).filter(
     (b) => !sourceFilter || b.source === sourceFilter,
@@ -195,6 +243,9 @@ export function BatchesPanel({
               batch={b}
               showSource={scope.kind === "all"}
               highlight={highlight === b.name}
+              isDismissed={dismissed.has(b.name)}
+              onDismiss={() => dismiss(b.name)}
+              onRestore={() => restore(b.name)}
               onMutate={() => mutate()}
             />
           )
@@ -209,12 +260,18 @@ function BatchRow({
   batch,
   showSource,
   highlight,
+  isDismissed,
+  onDismiss,
+  onRestore,
   onMutate,
 }: {
   sourceId: string
   batch: CampaignBatch
   showSource?: boolean
   highlight?: boolean
+  isDismissed?: boolean
+  onDismiss?: () => void
+  onRestore?: () => void
   onMutate: () => void
 }) {
   const [busy, setBusy] = React.useState<
@@ -546,6 +603,34 @@ function BatchRow({
                   : `Send ${batch.in_outlook - batch.sent}`}
               </Button>
             )}
+          {/* Manual archive (user-dismiss). Doesn't touch the file — just
+              hides the row from the Active view via localStorage. Available
+              for every source including Marcel. */}
+          {onDismiss && onRestore && (
+            isDismissed ? (
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={!!busy}
+                onClick={onRestore}
+                title="Restore to active list"
+                className="text-zinc-500 hover:text-zinc-200"
+              >
+                <RotateCcw className="size-3.5" />
+              </Button>
+            ) : (
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={!!busy}
+                onClick={onDismiss}
+                title="Archive (hide from active list)"
+                className="text-zinc-500 hover:text-zinc-200"
+              >
+                <Archive className="size-3.5" />
+              </Button>
+            )
+          )}
           {sourceId !== "marcel" && (
             <Button
               size="sm"
