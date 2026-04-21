@@ -331,6 +331,16 @@ class IngestPost(BaseModel):
     post_text: Optional[str] = None
     email: Optional[str] = None
     phone: Optional[str] = None
+    # Optional extension-generated draft fields. If the Chrome extension ran
+    # Claude locally (Auto-generate email on save), we accept its output so
+    # the user doesn't have to regenerate on the dashboard. Absent means the
+    # lead arrives as 'New' and needs a server-side Generate click.
+    gen_subject: Optional[str] = None
+    gen_body: Optional[str] = None
+    email_mode: Optional[str] = None      # individual | company
+    cv_cluster: Optional[str] = None      # python_ai | fullstack | scraping | n8n | default
+    should_skip: Optional[bool] = None
+    skip_reason: Optional[str] = None
 
 
 class IngestBatch(BaseModel):
@@ -352,11 +362,18 @@ def _log_event(con, kind: str, lead_id: Optional[int] = None, meta: Optional[dic
 def _upsert_lead(con, p: IngestPost) -> tuple[int, str]:
     """Insert or update by post_url. Returns (lead_id, action).
     Blocked by recyclebin dedup and company/domain blocklist on INSERT —
-    updates to existing active rows always pass through."""
+    updates to existing active rows always pass through.
+
+    If the extension pre-generated a draft (gen_subject + gen_body), the new
+    lead lands as status='Drafted'. If Claude decided should_skip=true, the
+    caller archives it in the same transaction."""
     now = dt.datetime.now().isoformat(timespec="seconds")
     row = con.execute(
         "SELECT id, email, status FROM leads WHERE post_url = ?", (p.post_url,)
     ).fetchone()
+
+    has_draft = bool((p.gen_subject or "").strip() and (p.gen_body or "").strip())
+    initial_status = "Drafted" if has_draft else "New"
 
     if row is None:
         # Already archived? Don't re-ingest — would undo a deliberate archive.
@@ -372,11 +389,21 @@ def _upsert_lead(con, p: IngestPost) -> tuple[int, str]:
         cur = con.execute(
             """INSERT INTO leads (post_url, posted_by, company, role, tech_stack,
                rate, location, tags, post_text, email, phone,
+               gen_subject, gen_body, email_mode, cv_cluster,
+               skip_reason, skip_source, status,
                first_seen_at, last_seen_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                       ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 p.post_url, p.posted_by, p.company, p.role, p.tech_stack,
                 p.rate, p.location, p.tags, p.post_text, p.email, p.phone,
+                p.gen_subject or None,
+                p.gen_body or None,
+                p.email_mode or "individual",
+                p.cv_cluster or None,
+                (p.skip_reason or None) if p.should_skip else None,
+                "claude" if p.should_skip else None,
+                initial_status,
                 now, now,
             ),
         )
@@ -385,7 +412,8 @@ def _upsert_lead(con, p: IngestPost) -> tuple[int, str]:
     lead_id = row["id"]
     # Refresh last_seen + fill in any now-known fields without clobbering
     # manually-edited ones. Email is only overwritten if we previously had
-    # nothing.
+    # nothing. Draft fields only fill in if the server hasn't already
+    # drafted this lead.
     fields = {
         "last_seen_at": now,
         "posted_by": p.posted_by,
@@ -400,10 +428,20 @@ def _upsert_lead(con, p: IngestPost) -> tuple[int, str]:
     }
     if not row["email"] and p.email:
         fields["email"] = p.email
+    if has_draft and row["status"] == "New":
+        fields["gen_subject"] = p.gen_subject
+        fields["gen_body"] = p.gen_body
+        fields["email_mode"] = p.email_mode or "individual"
+        fields["cv_cluster"] = p.cv_cluster
 
     sets = ", ".join(f"{k} = COALESCE(?, {k})" for k in fields)
     vals = [*fields.values(), lead_id]
     con.execute(f"UPDATE leads SET {sets} WHERE id = ?", vals)
+    # Bump status to Drafted if we just filled in a draft on a 'New' row.
+    if has_draft and row["status"] == "New":
+        con.execute(
+            "UPDATE leads SET status = 'Drafted' WHERE id = ?", (lead_id,)
+        )
     return lead_id, "updated"
 
 
@@ -417,11 +455,19 @@ def ingest(
     updated = 0
     dup_bin = 0
     blocked = 0
+    auto_skipped = 0
     with connect() as con:
         for p in payload.leads:
-            _, action = _upsert_lead(con, p)
+            lead_id, action = _upsert_lead(con, p)
             if action == "inserted":
                 inserted += 1
+                # Claude (from extension) already flagged this post as unfit
+                # → auto-archive right after insert, same as server-side
+                # draft flow does in /drafts/{id}/generate.
+                if p.should_skip and lead_id > 0:
+                    _archive_lead(con, lead_id,
+                                  reason=f"auto_skip:{(p.skip_reason or 'claude').strip()}")
+                    auto_skipped += 1
             elif action == "updated":
                 updated += 1
             elif action == "recyclebin_dup":
@@ -431,11 +477,13 @@ def ingest(
         _log_event(con, "ingest", meta={
             "inserted": inserted, "updated": updated,
             "dup_bin": dup_bin, "blocked": blocked,
+            "auto_skipped": auto_skipped,
         })
         con.commit()
     return {
         "inserted": inserted, "updated": updated,
         "dup_bin": dup_bin, "blocked": blocked,
+        "auto_skipped": auto_skipped,
         "total": len(payload.leads),
     }
 

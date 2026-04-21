@@ -1,10 +1,10 @@
 "use client"
 
 import * as React from "react"
-import useSWR from "swr"
-import { Search, Inbox } from "lucide-react"
+import useSWR, { mutate } from "swr"
+import { Search, Inbox, Send, Loader2 } from "lucide-react"
 import { cn } from "@/lib/utils"
-import { swrFetcher } from "@/lib/api"
+import { api, swrFetcher } from "@/lib/api"
 import type { LinkedInLead, LinkedInLeadsResponse } from "@/lib/types"
 import { LinkedInLeadDrawer } from "./linkedin-lead-drawer"
 
@@ -28,6 +28,22 @@ export function LinkedInLeadsTable({
   const [q, setQ] = React.useState("")
   const [debounced, setDebounced] = React.useState("")
   const [openId, setOpenId] = React.useState<number | null>(null)
+  const [sendingId, setSendingId] = React.useState<number | null>(null)
+
+  async function quickSend(e: React.MouseEvent, lead: LinkedInLead) {
+    e.stopPropagation()
+    if (!lead.email) return
+    if (!confirm(`Send email to ${lead.email}?`)) return
+    setSendingId(lead.id)
+    try {
+      await api.post(`/api/linkedin/send/lead/${lead.id}`)
+      mutate((k) => typeof k === "string" && k.startsWith("/api/linkedin/"))
+    } catch (err) {
+      alert((err as Error).message)
+    } finally {
+      setSendingId(null)
+    }
+  }
 
   React.useEffect(() => {
     const t = setTimeout(() => setDebounced(q), 250)
@@ -92,6 +108,7 @@ export function LinkedInLeadsTable({
                 <Th>Email</Th>
                 <Th>Status</Th>
                 <Th>First seen</Th>
+                <Th></Th>
               </tr>
             </thead>
             <tbody>
@@ -120,6 +137,23 @@ export function LinkedInLeadsTable({
                   <Td className="text-xs text-zinc-500 tnum">
                     {fmtDate(r.first_seen_at)}
                   </Td>
+                  <Td className="text-right pr-3">
+                    {r.status === "Drafted" && r.email ? (
+                      <button
+                        onClick={(e) => quickSend(e, r)}
+                        disabled={sendingId === r.id}
+                        className="inline-flex items-center gap-1 rounded bg-emerald-600/90 px-2 py-0.5 text-[11px] font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
+                        title="Send now"
+                      >
+                        {sendingId === r.id ? (
+                          <Loader2 className="size-3 animate-spin" />
+                        ) : (
+                          <Send className="size-3" />
+                        )}
+                        Send
+                      </button>
+                    ) : null}
+                  </Td>
                 </tr>
               ))}
             </tbody>
@@ -132,7 +166,7 @@ export function LinkedInLeadsTable({
   )
 }
 
-function Th({ children }: { children: React.ReactNode }) {
+function Th({ children }: { children?: React.ReactNode }) {
   return <th className="px-3 py-2 font-medium">{children}</th>
 }
 function Td({ children, className }: { children: React.ReactNode; className?: string }) {

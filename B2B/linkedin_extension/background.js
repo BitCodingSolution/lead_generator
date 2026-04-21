@@ -1235,6 +1235,14 @@ async function handleSaveToSheet(payload, _force) {
     post_text:  payload.post_text  || null,
     email:      payload.email      || null,
     phone:      payload.phone      || null,
+    // Forward the extension's Claude output so the dashboard can use it
+    // directly (status=Drafted) instead of re-running Claude on its side.
+    gen_subject: payload.email_subject || null,
+    gen_body:    payload.email_body    || null,
+    email_mode:  payload.email_mode    || null,
+    cv_cluster:  payload.cv_cluster    || null,
+    should_skip: payload.should_skip === true || payload.should_skip === "true",
+    skip_reason: payload.skip_reason   || null,
   };
 
   let res;
