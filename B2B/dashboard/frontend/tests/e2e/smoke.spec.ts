@@ -47,19 +47,24 @@ test.describe("smoke: pages render", () => {
     await expect(page.getByText(/Auto-scrape/i)).toBeVisible()
   })
 
-  test("Campaigns page shows All Batches panel above Marcel hero", async ({
+  test("Campaigns page shows All Batches panel only (no Marcel hero)", async ({
     page,
   }) => {
     await page.goto("/campaigns")
-    // Header
     await expect(
       page.getByRole("heading", { name: /campaigns/i }).first(),
     ).toBeVisible()
-    // Cross-source panel labels
     await expect(page.getByText(/all batches/i).first()).toBeVisible()
-    // Marcel hero underneath
+    // Marcel hero moved to /sources/marcel — must NOT be on /campaigns anymore
+    await expect(page.getByText(/run a campaign/i)).toHaveCount(0)
+  })
+
+  test("Marcel source page shows Run a Campaign hero", async ({ page }) => {
+    await page.goto("/sources/marcel")
     await expect(page.getByText(/run a campaign/i)).toBeVisible()
-    await expect(page.getByRole("button", { name: /run pipeline/i })).toBeVisible()
+    await expect(
+      page.getByRole("button", { name: /run pipeline/i }),
+    ).toBeVisible()
   })
 })
 

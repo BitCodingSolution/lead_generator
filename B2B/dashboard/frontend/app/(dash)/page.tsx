@@ -18,7 +18,6 @@ import {
   Flame,
   Target,
   Inbox,
-  Zap,
 } from "lucide-react"
 import { fmt, pct, relTime, truncate } from "@/lib/utils"
 
@@ -68,15 +67,6 @@ export default function OverviewPage() {
       <PageHeader
         title="Outreach Overview"
         subtitle="Daily state of the pipeline across all sources — drafts, sends, and replies at a glance."
-        actions={
-          <Link
-            href="/campaigns"
-            className="inline-flex items-center gap-1.5 rounded-md bg-[hsl(250_80%_62%)] hover:bg-[hsl(250_80%_58%)] text-white text-sm px-3 py-1.5 transition-colors shadow-[0_0_0_1px_rgba(255,255,255,0.05)]"
-          >
-            <Zap className="size-3.5" />
-            Open Campaigns
-          </Link>
-        }
       />
 
       {/* Campaign activity (cross-source batch counters) */}

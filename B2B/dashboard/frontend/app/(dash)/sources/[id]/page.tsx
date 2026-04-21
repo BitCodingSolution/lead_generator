@@ -14,6 +14,7 @@ import type {
   SourceDetail,
 } from "@/lib/sources"
 import { getCell } from "@/lib/sources"
+import { MarcelPipelinePanel } from "@/components/marcel-pipeline-panel"
 import { PageHeader } from "@/components/page-header"
 import { EmptyState } from "@/components/empty-state"
 import { Input } from "@/components/ui/input"
@@ -361,19 +362,7 @@ export default function SourceDetailPage() {
         />
       )}
 
-      {!isGrab && (
-        <div className="rounded-xl border border-zinc-800/80 bg-[#18181b] px-4 py-4 text-sm text-zinc-400">
-          This is the existing outreach dataset. Use the{" "}
-          <Link href="/leads" className="text-[hsl(250_80%_78%)] hover:underline">
-            Leads
-          </Link>{" "}
-          and{" "}
-          <Link href="/campaigns" className="text-[hsl(250_80%_78%)] hover:underline">
-            Campaigns
-          </Link>{" "}
-          tabs to work with Marcel data.
-        </div>
-      )}
+      {!isGrab && <MarcelPipelinePanel />}
 
       {/* Filters + table */}
       {isGrab && (
