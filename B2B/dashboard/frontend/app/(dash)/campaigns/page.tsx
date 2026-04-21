@@ -229,6 +229,64 @@ function CampaignsPageInner() {
     })
   }, [job?.logs, job?.status, count])
 
+  // ---- Smooth pipeline progress ------------------------------------------
+  // Top bar jumps 0→25→50→75→100 as stages flip. Smooth it out by including
+  // the active stage's sub-progress (from log-parsed counts) and, when those
+  // haven't ticked yet, a time-based extrapolation against typical per-stage
+  // durations.
+  const TYPICAL_STAGE_SECS: Record<StageKey, number> = {
+    pick: 3,
+    generate: 30,
+    outlook: 15,
+    send: 60,
+  }
+  const [smoothPct, setSmoothPct] = React.useState(0)
+  const activeStageRef = React.useRef<{ key: StageKey; at: number } | null>(
+    null,
+  )
+
+  React.useEffect(() => {
+    const activeNode = stageNodes.find((n) => n.state === "active")
+    const doneCount = stageNodes.filter((n) => n.state === "done").length
+    const total = stageNodes.length
+    const errored = stageNodes.some((n) => n.state === "error")
+    if (!activeNode || errored || job?.status === "done") {
+      // Settle to the discrete target
+      setSmoothPct(
+        total > 0
+          ? Math.min(100, (doneCount / total) * 100) + (errored ? 0 : 0)
+          : 0,
+      )
+      activeStageRef.current = null
+      return
+    }
+    const key = activeNode.key as StageKey
+    if (!activeStageRef.current || activeStageRef.current.key !== key) {
+      activeStageRef.current = { key, at: Date.now() }
+    }
+    const tick = () => {
+      const base = (doneCount / total) * 100
+      const stageSize = 100 / total
+      // Prefer parsed sub-progress if we have any events yet.
+      const parsedFrac =
+        activeNode.count && activeNode.count.total > 0
+          ? activeNode.count.done / activeNode.count.total
+          : 0
+      const elapsed =
+        (Date.now() - (activeStageRef.current?.at ?? Date.now())) / 1000
+      const timeFrac = Math.min(
+        0.95,
+        elapsed / TYPICAL_STAGE_SECS[key],
+      )
+      // Whichever is further along — cap at 95% until actual completion.
+      const frac = Math.min(0.95, Math.max(parsedFrac, timeFrac))
+      setSmoothPct(Math.min(100, base + frac * stageSize))
+    }
+    tick()
+    const iv = setInterval(tick, 200)
+    return () => clearInterval(iv)
+  }, [stageNodes, job?.status])
+
   // ---------------- Actions ----------------
 
   async function runPipeline() {
@@ -481,7 +539,8 @@ function CampaignsPageInner() {
           const activeNode = stageNodes.find((n) => n.state === "active")
           const errorNode = stageNodes.find((n) => n.state === "error")
           const total = stageNodes.length
-          const pct = Math.round((doneCount / total) * 100)
+          // Smooth pct (time + log-parsed sub-progress interpolation).
+          const pct = Math.round(smoothPct)
           const currentLabel = errorNode
             ? `Error at ${errorNode.label}`
             : activeNode
