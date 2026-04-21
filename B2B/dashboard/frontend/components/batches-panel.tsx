@@ -179,6 +179,47 @@ function BatchRow({
   >(null)
   const stateMeta = STATE_META[batch.state] || STATE_META.fresh
 
+  // --- Smooth live progress for the active step ---
+  // When a step (drafts/outlook/send) is running, the underlying Excel-based
+  // counters only refresh on SWR tick — causing a 0→100 jump at the end.
+  // Interpolate client-side using elapsed time vs a typical per-row duration
+  // so the bar inches forward continuously.
+  const [tick, setTickNow] = React.useState(0)
+  const busyStartRef = React.useRef<{ kind: string; at: number } | null>(null)
+  React.useEffect(() => {
+    if (busy === "drafts" || busy === "outlook" || busy === "send") {
+      if (!busyStartRef.current || busyStartRef.current.kind !== busy) {
+        busyStartRef.current = { kind: busy, at: Date.now() }
+      }
+      const iv = setInterval(() => setTickNow((n) => n + 1), 300)
+      return () => clearInterval(iv)
+    }
+    busyStartRef.current = null
+  }, [busy])
+
+  // Per-row typical durations (seconds per row).
+  const typicalSecsPerRow: Record<string, number> = {
+    drafts: 10,
+    outlook: 3,
+    send: 8,
+  }
+
+  function smoothedCount(
+    step: "drafts" | "outlook" | "send",
+    actualDone: number,
+  ): number {
+    if (busy !== step || !busyStartRef.current) return actualDone
+    const perRow = typicalSecsPerRow[step] ?? 10
+    const elapsed = (Date.now() - busyStartRef.current.at) / 1000
+    // We don't know exact remaining, so advance toward total with 95% cap
+    // of (total - actualDone) so the bar never overshoots before SWR confirms.
+    const remaining = Math.max(0, batch.total - actualDone)
+    const progressed = Math.min(remaining * 0.95, elapsed / perRow)
+    // silence unused-var: tick drives re-render
+    void tick
+    return Math.min(batch.total, actualDone + progressed)
+  }
+
   function waitForJob(jobId: string, label: string): Promise<void> {
     const started = Date.now()
     const toastId = toast.loading(`${label} starting…`)
@@ -304,7 +345,12 @@ function BatchRow({
   }
 
   const pct = (n: number) =>
-    batch.total ? Math.round((n / batch.total) * 100) : 0
+    batch.total ? Math.min(100, (n / batch.total) * 100) : 0
+
+  // Smoothed counts — only differ from raw counts while a step is busy.
+  const displayDrafted = smoothedCount("drafts", batch.drafted)
+  const displayOutlook = smoothedCount("outlook", batch.in_outlook)
+  const displaySent = smoothedCount("send", batch.sent)
   const steps = [
     { key: "excel", label: "Excel", done: batch.total > 0, count: batch.total },
     {
@@ -468,9 +514,9 @@ function BatchRow({
       </div>
       {batch.total > 0 && (
         <div className="mt-2 grid grid-cols-3 gap-2 text-[10px] text-zinc-500">
-          <MiniBar label="Drafts" percent={pct(batch.drafted)} />
-          <MiniBar label="Outlook" percent={pct(batch.in_outlook)} />
-          <MiniBar label="Sent" percent={pct(batch.sent)} />
+          <MiniBar label="Drafts" percent={pct(displayDrafted)} />
+          <MiniBar label="Outlook" percent={pct(displayOutlook)} />
+          <MiniBar label="Sent" percent={pct(displaySent)} />
         </div>
       )}
     </div>
@@ -487,14 +533,14 @@ function MiniBar({ label, percent }: { label: string; percent: number }) {
       <div className="h-1 rounded bg-zinc-900 overflow-hidden">
         <div
           className={cn(
-            "h-full",
-            percent === 100
+            "h-full transition-[width] duration-300 ease-linear",
+            percent >= 100
               ? "bg-emerald-500"
               : percent > 0
                 ? "bg-[hsl(250_80%_62%)]"
                 : "bg-zinc-800",
           )}
-          style={{ width: `${percent}%` }}
+          style={{ width: `${percent.toFixed(2)}%` }}
         />
       </div>
     </div>

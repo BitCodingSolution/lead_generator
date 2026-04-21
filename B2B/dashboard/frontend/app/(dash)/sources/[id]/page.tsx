@@ -872,6 +872,20 @@ type JobDetail = {
   step_label?: string
 }
 
+// Rough typical duration (seconds) per step label — used to interpolate a
+// smooth progress bar between discrete step transitions when the backend
+// doesn't emit sub-progress. Tunable; err on the long side so the bar
+// reaches ~95% of its step right as real completion arrives.
+function _typicalStepSecs(label: string): number {
+  const l = label.toLowerCase()
+  if (l.includes("enrich")) return 90
+  if (l.includes("scrape") || l.includes("collect")) return 25
+  if (l.includes("draft") || l.includes("claude")) return 30
+  if (l.includes("outlook")) return 15
+  if (l.includes("export")) return 5
+  return 20
+}
+
 function JobProgressBanner({ sourceId }: { sourceId: string }) {
   const { data: last } = useSWR<LastRun>(
     `/api/sources/${sourceId}/last-run`,
@@ -887,6 +901,48 @@ function JobProgressBanner({ sourceId }: { sourceId: string }) {
   )
   const isRunning =
     last?.exists && (last.status === "running" || last.status === "queued")
+
+  const stepTotal = job?.step_total || 0
+  const stepIdx = job?.step_index || 0
+  const stepLabel = job?.step_label || ""
+  const lastLog =
+    (job?.logs || []).slice(-1)[0] || last?.progress?.last_line || ""
+  const p = last?.progress
+  const subPercent = p?.percent ?? null
+
+  // --- Smooth time-based interpolation ---
+  // When a step transitions, snap base then tick toward the next step's
+  // boundary at (elapsed / typical). Capped at 95% of the step so the bar
+  // doesn't overshoot before the real completion arrives.
+  const [smoothedPct, setSmoothedPct] = React.useState(0)
+  const stepStartRef = React.useRef<{ idx: number; at: number } | null>(null)
+
+  React.useEffect(() => {
+    if (!isRunning || stepTotal === 0) {
+      stepStartRef.current = null
+      return
+    }
+    if (!stepStartRef.current || stepStartRef.current.idx !== stepIdx) {
+      stepStartRef.current = { idx: stepIdx, at: Date.now() }
+    }
+    const tick = () => {
+      const sz = 100 / stepTotal
+      const base = Math.max(0, stepIdx - 1) * sz
+      const startedAt = stepStartRef.current?.at ?? Date.now()
+      const elapsed = (Date.now() - startedAt) / 1000
+      const typical = _typicalStepSecs(stepLabel)
+      // Prefer backend sub-progress when available; else time-based guess.
+      const frac =
+        subPercent !== null
+          ? Math.min(1, subPercent / 100)
+          : Math.min(0.95, elapsed / typical)
+      setSmoothedPct(Math.min(100, base + frac * sz))
+    }
+    tick()
+    const iv = setInterval(tick, 150)
+    return () => clearInterval(iv)
+  }, [isRunning, stepTotal, stepIdx, stepLabel, subPercent])
+
   if (!isRunning) return null
 
   const kindLabel =
@@ -900,26 +956,7 @@ function JobProgressBanner({ sourceId }: { sourceId: string }) {
             ? "Enriching"
             : last?.kind || "Running"
 
-  const stepTotal = job?.step_total || 0
-  const stepIdx = job?.step_index || 0
-  const stepLabel = job?.step_label || ""
-  const lastLog = (job?.logs || []).slice(-1)[0] || last?.progress?.last_line || ""
-
-  const p = last?.progress
-  const subPercent = p?.percent ?? null
-
-  // Chain-level percent: (idx - 1 + subPercent||0) / total
-  const chainPercent =
-    stepTotal > 0
-      ? Math.min(
-          100,
-          Math.round(
-            ((Math.max(0, stepIdx - 1) + (subPercent ? subPercent / 100 : 0)) /
-              stepTotal) *
-              100,
-          ),
-        )
-      : subPercent
+  const chainPercent = stepTotal > 0 ? Math.round(smoothedPct) : subPercent
 
   async function stop() {
     if (!jobId) return
@@ -972,13 +1009,15 @@ function JobProgressBanner({ sourceId }: { sourceId: string }) {
           <div className="mt-2 h-1.5 w-full rounded-full bg-zinc-900 overflow-hidden">
             <div
               className={cn(
-                "h-full rounded-full transition-[width] duration-500",
-                chainPercent !== null
+                "h-full rounded-full transition-[width] duration-200 ease-linear",
+                stepTotal > 0
                   ? "bg-gradient-to-r from-[hsl(250_80%_62%)] to-[hsl(270_90%_72%)]"
                   : "bg-[hsl(250_80%_62%)] animate-pulse w-1/3",
               )}
               style={
-                chainPercent !== null ? { width: `${chainPercent}%` } : undefined
+                stepTotal > 0
+                  ? { width: `${smoothedPct.toFixed(2)}%` }
+                  : undefined
               }
             />
           </div>
