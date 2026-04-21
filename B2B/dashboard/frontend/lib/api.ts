@@ -35,4 +35,8 @@ export const api = {
   },
 }
 
-export const swrFetcher = (path: string) => api.get(path)
+// Cast to `any` so `useSWR<T>(key, swrFetcher)` infers the right data type
+// at the call site. Without this, SWR's strict overloads reject the
+// `unknown`-returning generic helper.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export const swrFetcher = (path: string) => api.get(path) as Promise<any>
