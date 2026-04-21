@@ -320,7 +320,13 @@ def revoke_extension_key(key: str):
 
 
 class IngestPost(BaseModel):
-    post_url: str = Field(min_length=1)
+    # Accept any non-empty post_url OR an empty string (will be rejected
+    # with a cleaner error downstream instead of a 422 validation blob).
+    # Extra unknown fields are ignored — future extension versions can add
+    # richer payloads without breaking the contract.
+    model_config = {"extra": "ignore"}
+
+    post_url: str = Field(default="")
     posted_by: Optional[str] = None
     company: Optional[str] = None
     role: Optional[str] = None
@@ -456,8 +462,12 @@ def ingest(
     dup_bin = 0
     blocked = 0
     auto_skipped = 0
+    missing_url = 0
     with connect() as con:
         for p in payload.leads:
+            if not (p.post_url or "").strip():
+                missing_url += 1
+                continue
             lead_id, action = _upsert_lead(con, p)
             if action == "inserted":
                 inserted += 1
@@ -477,13 +487,14 @@ def ingest(
         _log_event(con, "ingest", meta={
             "inserted": inserted, "updated": updated,
             "dup_bin": dup_bin, "blocked": blocked,
-            "auto_skipped": auto_skipped,
+            "auto_skipped": auto_skipped, "missing_url": missing_url,
         })
         con.commit()
     return {
         "inserted": inserted, "updated": updated,
         "dup_bin": dup_bin, "blocked": blocked,
         "auto_skipped": auto_skipped,
+        "missing_url": missing_url,
         "total": len(payload.leads),
     }
 
