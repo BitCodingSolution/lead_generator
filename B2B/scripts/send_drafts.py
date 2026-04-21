@@ -126,6 +126,17 @@ def main():
             con.commit()
             sent_count += 1
             df.at[i, 'sent_at'] = sent_ts
+            # Persist Excel after every successful send so a crash/stop
+            # between here and the end of the loop doesn't leave the file
+            # out of sync with the DB (DB = source of truth per row).
+            try:
+                with pd.ExcelWriter(
+                    args.file, engine='xlsxwriter',
+                    engine_kwargs={'options': {'strings_to_urls': False}},
+                ) as w:
+                    df.to_excel(w, sheet_name='Batch', index=False)
+            except Exception as _we:
+                print(f"  [{lead_id}] Excel writeback warning: {_we}")
             print(f"  [{sent_count}/{len(todo)}] SENT  {lead_id}  ->  {row['email']}")
 
             if idx < len(todo) - 1 and not args.no_jitter:

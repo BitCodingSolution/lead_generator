@@ -119,10 +119,12 @@ test.describe("api: backend endpoints", () => {
     const list = await (
       await request.get(`${API}/api/campaigns/batches`)
     ).json()
+    // Marcel batches live in a different dir; the send endpoint is
+    // grab-sources only, so restrict the fixture to grab-type batches.
     const fullySent = (list.batches as any[]).find(
-      (b) => b.total > 0 && b.sent === b.total,
+      (b) => b.source !== "marcel" && b.total > 0 && b.sent === b.total,
     )
-    test.skip(!fullySent, "no fully-sent batch to exercise")
+    test.skip(!fullySent, "no fully-sent grab batch to exercise")
     const r = await request.post(
       `${API}/api/sources/${fullySent.source}/batches/${encodeURIComponent(
         fullySent.name,
