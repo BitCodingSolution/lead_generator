@@ -137,6 +137,13 @@ export function LinkedInBatchSend() {
               <span className="text-zinc-500">↷ {data?.skipped ?? 0}</span>
             </span>
           </div>
+          <div className="flex items-center justify-between text-[11px] text-zinc-500 tnum">
+            <span>Elapsed {fmtDuration(elapsedSec(data?.started_at))}</span>
+            <span>
+              ETA {fmtDuration(etaSec(data, doneCount))}
+              {data?.total ? ` (${((data.total - doneCount) * 75)}s worst case)` : ""}
+            </span>
+          </div>
           {data?.current_email && (
             <div className="flex items-center gap-1.5 text-[11px] text-zinc-500 font-mono truncate">
               <Mail className="size-3" />
@@ -174,6 +181,31 @@ export function LinkedInBatchSend() {
       )}
     </div>
   )
+}
+
+function elapsedSec(iso: string | null | undefined): number {
+  if (!iso) return 0
+  return Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 1000))
+}
+
+function etaSec(data: BatchState | undefined, done: number): number {
+  if (!data || !data.started_at || done <= 0 || data.total === 0) return 0
+  // Mean jitter between sends is ~75s; we amortize elapsed/done over
+  // remaining to smooth out as we go.
+  const elapsed = elapsedSec(data.started_at)
+  const avgPerLead = elapsed / done
+  const remaining = data.total - done
+  return Math.max(0, Math.floor(avgPerLead * remaining))
+}
+
+function fmtDuration(sec: number): string {
+  if (!sec) return "—"
+  const m = Math.floor(sec / 60)
+  const s = sec % 60
+  if (m === 0) return `${s}s`
+  if (m < 60) return `${m}m ${s.toString().padStart(2, "0")}s`
+  const h = Math.floor(m / 60)
+  return `${h}h ${(m % 60).toString().padStart(2, "0")}m`
 }
 
 function fmtRelative(iso: string): string {

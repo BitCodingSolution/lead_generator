@@ -36,6 +36,11 @@ from linkedin_db import DB_PATH, connect
 
 router = APIRouter(prefix="/api/linkedin", tags=["linkedin-extras"])
 
+import csv
+import io
+
+from fastapi.responses import PlainTextResponse
+
 CV_CLUSTERS = ("python_ai", "fullstack", "scraping", "n8n", "default")
 CV_STORAGE_DIR = DB_PATH.parent / "cvs"
 
@@ -435,6 +440,174 @@ def _build_followup_body(sequence: int, posted_by: str, role: str) -> str:
     return tmpl.format(
         first_name=_first_name(posted_by),
         role_or_post=(role or "role").strip() or "role",
+    )
+
+
+# -------------------------------------------------- analytics (day-by-day)
+
+
+@router.get("/analytics")
+def linkedin_analytics(days: int = 30):
+    """Day-by-day counts of: drafted, sent, replied, bounced. Returns the
+    last N days (default 30), oldest-first for chart rendering."""
+    if days < 1 or days > 180:
+        raise HTTPException(400, "days must be 1..180")
+
+    end = dt.date.today()
+    start = end - dt.timedelta(days=days - 1)
+
+    # Bucket by day across leads table (sent_at, replied_at, bounced_at) and
+    # events table (kind='draft').
+    with connect() as con:
+        def per_day(column: str, where_extra: str = "") -> dict[str, int]:
+            rows = con.execute(
+                f"SELECT DATE({column}) AS d, COUNT(*) AS n FROM leads "
+                f"WHERE {column} IS NOT NULL AND DATE({column}) >= ? "
+                f"      {('AND ' + where_extra) if where_extra else ''} "
+                f"GROUP BY DATE({column})",
+                (start.isoformat(),),
+            ).fetchall()
+            return {r["d"]: int(r["n"]) for r in rows}
+
+        sent_map = per_day("sent_at")
+        replied_map = per_day("replied_at")
+        bounced_map = per_day("bounced_at")
+
+        drafted_rows = con.execute(
+            "SELECT DATE(at) AS d, COUNT(*) AS n FROM events "
+            "WHERE kind = 'draft' AND DATE(at) >= ? "
+            "GROUP BY DATE(at)",
+            (start.isoformat(),),
+        ).fetchall()
+        drafted_map = {r["d"]: int(r["n"]) for r in drafted_rows}
+
+        totals = {
+            "total_leads": con.execute("SELECT COUNT(*) FROM leads").fetchone()[0],
+            "sent": con.execute(
+                "SELECT COUNT(*) FROM leads WHERE sent_at IS NOT NULL"
+            ).fetchone()[0],
+            "replied": con.execute(
+                "SELECT COUNT(*) FROM leads WHERE replied_at IS NOT NULL"
+            ).fetchone()[0],
+            "bounced": con.execute(
+                "SELECT COUNT(*) FROM leads WHERE bounced_at IS NOT NULL"
+            ).fetchone()[0],
+            "recyclebin": con.execute("SELECT COUNT(*) FROM recyclebin").fetchone()[0],
+        }
+
+    series: list[dict] = []
+    for i in range(days):
+        d = (start + dt.timedelta(days=i)).isoformat()
+        series.append({
+            "day": d,
+            "drafted": drafted_map.get(d, 0),
+            "sent":    sent_map.get(d, 0),
+            "replied": replied_map.get(d, 0),
+            "bounced": bounced_map.get(d, 0),
+        })
+
+    reply_rate = (
+        round(totals["replied"] / totals["sent"] * 100, 1)
+        if totals["sent"]
+        else 0.0
+    )
+    bounce_rate = (
+        round(totals["bounced"] / totals["sent"] * 100, 1)
+        if totals["sent"]
+        else 0.0
+    )
+
+    return {
+        "days": days,
+        "start": start.isoformat(),
+        "end": end.isoformat(),
+        "series": series,
+        "totals": totals,
+        "reply_rate_pct": reply_rate,
+        "bounce_rate_pct": bounce_rate,
+    }
+
+
+# -------------------------------------------------- per-lead event timeline
+
+
+@router.get("/leads/{lead_id:int}/events")
+def lead_events(lead_id: int, limit: int = 100):
+    with connect() as con:
+        rows = con.execute(
+            "SELECT id, at, kind, meta_json FROM events "
+            "WHERE lead_id = ? ORDER BY at DESC LIMIT ?",
+            (lead_id, limit),
+        ).fetchall()
+        out = []
+        for r in rows:
+            out.append({
+                "id": r["id"],
+                "at": r["at"],
+                "kind": r["kind"],
+                "meta": json.loads(r["meta_json"]) if r["meta_json"] else None,
+            })
+        return {"rows": out}
+
+
+# -------------------------------------------------- CSV export
+
+
+def _csv_response(filename: str, headers: list[str], rows: list[list]) -> PlainTextResponse:
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(headers)
+    for r in rows:
+        w.writerow(r)
+    return PlainTextResponse(
+        content=buf.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get("/leads/export")
+def export_leads():
+    cols = [
+        "id", "post_url", "posted_by", "company", "role", "tech_stack",
+        "location", "email", "phone", "status", "email_mode", "cv_cluster",
+        "gen_subject", "jaydip_note", "first_seen_at", "sent_at",
+        "replied_at", "bounced_at",
+    ]
+    with connect() as con:
+        rows = con.execute(
+            f"SELECT {', '.join(cols)} FROM leads ORDER BY first_seen_at DESC"
+        ).fetchall()
+    return _csv_response(
+        f"linkedin_leads_{dt.date.today().isoformat()}.csv",
+        cols,
+        [[r[c] for c in cols] for r in rows],
+    )
+
+
+@router.get("/recyclebin/export")
+def export_recyclebin():
+    cols_out = [
+        "id", "original_id", "post_url", "reason", "moved_at",
+        "company", "posted_by", "role", "email",
+    ]
+    with connect() as con:
+        rows = con.execute(
+            "SELECT id, original_id, post_url, reason, moved_at, payload_json "
+            "FROM recyclebin ORDER BY moved_at DESC"
+        ).fetchall()
+
+    data: list[list] = []
+    for r in rows:
+        p = json.loads(r["payload_json"] or "{}")
+        data.append([
+            r["id"], r["original_id"], r["post_url"], r["reason"], r["moved_at"],
+            p.get("company"), p.get("posted_by"), p.get("role"), p.get("email"),
+        ])
+    return _csv_response(
+        f"linkedin_recyclebin_{dt.date.today().isoformat()}.csv",
+        cols_out,
+        data,
     )
 
 

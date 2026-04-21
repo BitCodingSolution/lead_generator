@@ -54,6 +54,7 @@ const SECTIONS: NavSection[] = [
       { href: "/linkedin/recyclebin", label: "Recyclebin", icon: Trash2 },
       { href: "/linkedin/blocklist", label: "Blocklist", icon: Ban },
       { href: "/linkedin/cvs", label: "CV library", icon: FileText },
+      { href: "/linkedin/analytics", label: "Analytics", icon: BarChart3 },
       { href: "/linkedin/settings", label: "Settings", icon: Settings },
     ],
   },

@@ -308,6 +308,8 @@ export function LinkedInLeadDrawer({
                 {lead.post_text || "—"}
               </div>
             </section>
+
+            <TimelineSection leadId={lead.id} />
           </div>
         )}
 
@@ -319,6 +321,74 @@ export function LinkedInLeadDrawer({
       </aside>
     </div>
   )
+}
+
+const EVENT_ICONS: Record<string, string> = {
+  ingest: "+",
+  draft: "✏",
+  draft_fallback: "⚠",
+  draft_skipped: "⤫",
+  send: "→",
+  send_error: "×",
+  inbox_reply: "⇐",
+  inbox_bounce: "✗",
+  inbox_auto_reply: "•",
+  followup_send: "↻",
+  archive: "⎚",
+  restore: "↩",
+}
+
+function TimelineSection({ leadId }: { leadId: number }) {
+  const { data } = useSWR<{
+    rows: { id: number; at: string; kind: string; meta: unknown }[]
+  }>(`/api/linkedin/leads/${leadId}/events`, swrFetcher)
+
+  const rows = data?.rows ?? []
+  if (rows.length === 0) return null
+
+  return (
+    <section>
+      <div className="text-[11px] font-medium uppercase tracking-[0.1em] text-zinc-500 mb-1.5">
+        Timeline
+      </div>
+      <ul className="space-y-1.5">
+        {rows.map((r) => (
+          <li
+            key={r.id}
+            className="flex items-start gap-2 text-xs text-zinc-300"
+          >
+            <span className="mt-0.5 inline-flex size-5 shrink-0 items-center justify-center rounded-full bg-zinc-800/70 text-[11px] text-zinc-400">
+              {EVENT_ICONS[r.kind] ?? "·"}
+            </span>
+            <div className="min-w-0 flex-1">
+              <span className="font-mono text-[11px] text-zinc-500 tnum">
+                {fmtTs(r.at)}
+              </span>
+              <span className="ml-2 text-zinc-200">
+                {r.kind.replace(/_/g, " ")}
+              </span>
+              {r.meta ? (
+                <div className="mt-0.5 text-[11px] text-zinc-500 font-mono break-all">
+                  {JSON.stringify(r.meta)}
+                </div>
+              ) : null}
+            </div>
+          </li>
+        ))}
+      </ul>
+    </section>
+  )
+}
+
+function fmtTs(iso: string): string {
+  try {
+    return new Date(iso).toLocaleString(undefined, {
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    })
+  } catch { return iso }
 }
 
 function Facts({ lead }: { lead: LeadFull }) {

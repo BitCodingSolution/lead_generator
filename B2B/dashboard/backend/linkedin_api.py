@@ -472,7 +472,7 @@ def account_warning(
 # ---------- lead detail, edit, archive, restore ----------
 
 
-@router.get("/leads/{lead_id}")
+@router.get("/leads/{lead_id:int}")
 def get_lead(lead_id: int):
     with connect() as con:
         r = con.execute("SELECT * FROM leads WHERE id = ?", (lead_id,)).fetchone()
@@ -489,7 +489,7 @@ class LeadPatch(BaseModel):
     needs_attention: Optional[bool] = None
 
 
-@router.post("/leads/{lead_id}")
+@router.post("/leads/{lead_id:int}")
 def patch_lead(lead_id: int, patch: LeadPatch):
     updates = {k: v for k, v in patch.model_dump().items() if v is not None}
     if not updates:
@@ -629,8 +629,6 @@ def generate_draft(lead_id: int):
             location=row["location"] or "",
             post_text=row["post_text"] or "",
         )
-    except requests.exceptions.RequestException as e:
-        raise HTTPException(502, f"Claude Bridge unreachable: {e}")
     except Exception as e:
         raise HTTPException(500, f"Draft generation failed: {e}")
 
@@ -657,16 +655,20 @@ def generate_draft(lead_id: int):
                 "archived": True,
             }
 
+        # If fallback returned no draft (Bridge down + no regex skip hit),
+        # keep status=New so the next generate attempt re-runs cleanly.
+        new_status = "Drafted" if (result.subject or result.body) else "New"
         con.execute(
             "UPDATE leads SET gen_subject = ?, gen_body = ?, email_mode = ?, "
-            "cv_cluster = ?, status = 'Drafted', skip_reason = NULL, "
+            "cv_cluster = ?, status = ?, skip_reason = NULL, "
             "skip_source = NULL WHERE id = ?",
             (
                 result.subject, result.body, result.email_mode,
-                result.cv_cluster, lead_id,
+                result.cv_cluster, new_status, lead_id,
             ),
         )
-        _log_event(con, "draft", lead_id=lead_id,
+        _log_event(con, "draft" if new_status == "Drafted" else "draft_fallback",
+                   lead_id=lead_id,
                    meta={"mode": result.email_mode, "cv": result.cv_cluster})
         con.commit()
 
