@@ -126,9 +126,33 @@ def main():
         try:
             mail = outlook.CreateItem(0)  # 0 = olMailItem
             mail.To = email
+            # Grab-source batches may include a `bcc` column (comma-separated
+            # co-founder emails when group_by_company was on). Set it only if
+            # present and non-empty; legacy Marcel batches won't have it.
+            bcc_raw = _s(row.get("bcc")) if "bcc" in df.columns else ""
+            if bcc_raw:
+                # Outlook expects semicolons between recipients, not commas.
+                bcc_clean = ";".join(
+                    p.strip() for p in bcc_raw.replace(",", ";").split(";") if p.strip()
+                )
+                try:
+                    mail.BCC = bcc_clean
+                    # Force resolve so Send() later doesn't bail on unresolved names.
+                    try:
+                        mail.Recipients.ResolveAll()
+                    except Exception:
+                        pass
+                except Exception as e:
+                    print(f"  [{lead_id}] BCC set failed: {e} (continuing without BCC)")
             mail.Subject = subject
             mail.BodyFormat = 2  # olFormatHTML
-            mail.HTMLBody = body_to_html(body) + SIGNATURE_HTML
+            # English drafts (grab sources) have signature already baked into
+            # the body. Marcel/German drafts do not, so we append the HTML sig.
+            lang = _s(row.get("draft_language")).lower() if "draft_language" in df.columns else ""
+            if lang == "en":
+                mail.HTMLBody = body_to_html(body)
+            else:
+                mail.HTMLBody = body_to_html(body) + SIGNATURE_HTML
             mail.Save()  # saves to default Drafts (single pradip@ account)
             entry_id = mail.EntryID
 

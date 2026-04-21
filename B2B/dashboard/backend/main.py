@@ -39,6 +39,718 @@ app.add_middleware(
 )
 
 
+# ---- Multi-source registry (Marcel + Grab Leads sources) ----
+from sources_api import router as sources_router, register_source, Source  # noqa: E402
+
+_GRAB_ROOT = BASE / "grab_leads"
+
+register_source(Source(
+    id="marcel",
+    label="Marcel Data",
+    db_path=Path(DB),
+    type="outreach",
+    icon="Mail",
+    description="Primary outreach dataset — already in the B2B pipeline.",
+))
+
+register_source(Source(
+    id="ycombinator",
+    label="Y Combinator",
+    db_path=_GRAB_ROOT / "sources" / "ycombinator" / "data.db",
+    type="grab",
+    schema_path=_GRAB_ROOT / "sources" / "ycombinator" / "schema.json",
+    icon="Rocket",
+    description="YC portfolio companies — funded, US-heavy, actively hiring.",
+))
+
+app.include_router(sources_router)
+
+
+# ---- Source action endpoints (scrape / enrich / export-batch) ----
+class SourceActionReq(BaseModel):
+    args: dict[str, object] | None = None   # e.g. {"limit": 200, "hiring_only": True, "industry": "B2B"}
+
+
+def _schema_flag_args(schema: dict, args: dict | None) -> list[str]:
+    """Convert a dict of user-supplied args into CLI flags using the schema's
+    option_args descriptor, then prepend default_args."""
+    scraper = (schema.get("scraper") or {})
+    defaults = list(scraper.get("default_args") or [])
+    opts = scraper.get("option_args") or []
+    # Build a lookup: logical key (normalized) -> flag metadata
+    by_key = {}
+    for o in opts:
+        flag = o.get("flag", "")
+        key = flag.lstrip("-").replace("-", "_")
+        by_key[key] = o
+
+    chosen = list(defaults)
+    for key, val in (args or {}).items():
+        meta = by_key.get(key)
+        if not meta:
+            continue
+        flag = meta["flag"]
+        t = meta.get("type", "string")
+        if t == "bool":
+            if val and flag not in chosen:
+                chosen.append(flag)
+            elif not val and flag in chosen:
+                chosen.remove(flag)
+        elif t == "int":
+            if val is not None and str(val).strip() != "":
+                chosen += [flag, str(int(val))]
+        else:  # string
+            if val:
+                chosen += [flag, str(val)]
+    return chosen
+
+
+@app.post("/api/sources/{source_id}/scrape")
+def source_scrape(source_id: str, req: SourceActionReq):
+    from sources_api import get_source
+    s = get_source(source_id)
+    if s.type != "grab":
+        raise HTTPException(400, "Scrape is only available for grab-type sources")
+    schema = s.load_schema()
+    scraper_rel = (schema.get("scraper") or {}).get("path")
+    if not scraper_rel:
+        raise HTTPException(400, f"Source '{source_id}' has no scraper declared in schema.json")
+    script = str(_GRAB_ROOT / scraper_rel)
+    argv = [PY, script, *_schema_flag_args(schema, req.args or {})]
+    label = f"Scrape: {source_id}"
+    job_id = start_job(argv, label=label)
+    LAST_RUNS[source_id] = {
+        "kind": "scrape", "argv": argv, "label": label,
+        "started_at": dt.datetime.now().isoformat(timespec="seconds"),
+        "job_id": job_id,
+    }
+    return {"job_id": job_id, "argv": argv}
+
+
+@app.post("/api/sources/{source_id}/enrich")
+def source_enrich(source_id: str, req: SourceActionReq):
+    from sources_api import get_source
+    s = get_source(source_id)
+    if s.type != "grab":
+        raise HTTPException(400, "Enrich is only available for grab-type sources")
+    schema = s.load_schema()
+    enricher = (schema.get("enricher") or {})
+    path = enricher.get("path") or "common/enrich.py"
+    default_args = list(enricher.get("default_args") or ["--source", source_id])
+    extra: list[str] = []
+    limit = (req.args or {}).get("limit")
+    if limit:
+        extra += ["--limit", str(int(limit))]
+    argv = [PY, str(_GRAB_ROOT / path), *default_args, *extra]
+    label = f"Enrich: {source_id}"
+    job_id = start_job(argv, label=label)
+    LAST_RUNS[source_id] = {
+        "kind": "enrich", "argv": argv, "label": label,
+        "started_at": dt.datetime.now().isoformat(timespec="seconds"),
+        "job_id": job_id,
+    }
+    return {"job_id": job_id, "argv": argv}
+
+
+@app.post("/api/sources/{source_id}/collect")
+def source_collect(source_id: str, req: SourceActionReq):
+    """Single server-side pipeline: scrape -> enrich. One job_id, survives
+    browser refresh / tab close. Frontend just polls the one id."""
+    from sources_api import get_source
+    s = get_source(source_id)
+    if s.type != "grab":
+        raise HTTPException(400, "Collect is only for grab sources")
+    schema = s.load_schema()
+    scraper_rel = (schema.get("scraper") or {}).get("path")
+    if not scraper_rel:
+        raise HTTPException(400, f"Source '{source_id}' has no scraper")
+    enricher = (schema.get("enricher") or {})
+    enricher_rel = enricher.get("path") or "common/enrich.py"
+    enricher_default = list(enricher.get("default_args") or ["--source", source_id])
+
+    scrape_argv = [PY, str(_GRAB_ROOT / scraper_rel), *_schema_flag_args(schema, req.args or {})]
+    enrich_argv = [PY, str(_GRAB_ROOT / enricher_rel), *enricher_default]
+    limit = (req.args or {}).get("limit")
+    if limit:
+        enrich_argv += ["--limit", str(int(limit))]
+
+    steps = [
+        {"label": "Scrape companies", "argv": scrape_argv},
+        {"label": "Enrich founders", "argv": enrich_argv},
+    ]
+    label = f"Collect: {source_id}"
+    job_id = start_chain_job(steps, label)
+    LAST_RUNS[source_id] = {
+        "kind": "collect", "chain": steps, "label": label,
+        "started_at": dt.datetime.now().isoformat(timespec="seconds"),
+        "job_id": job_id,
+    }
+    return {"job_id": job_id, "steps": [s["label"] for s in steps]}
+
+
+class CampaignReq(BaseModel):
+    lead_ids: list[int]
+    max: int | None = None
+    industry_tag: str = "YC Portfolio"
+    tier: int = 1
+    group_by_company: bool = True
+
+
+@app.post("/api/sources/{source_id}/campaign")
+def source_campaign(source_id: str, req: CampaignReq):
+    """Single server-side pipeline: export Excel -> generate drafts (Claude via
+    Bridge) -> write to Outlook drafts. Returns one job_id."""
+    if not req.lead_ids:
+        raise HTTPException(400, "lead_ids is required")
+    max_rows = req.max or len(req.lead_ids)
+
+    # Step 1: export is a Python callable (no subprocess needed, no Excel
+    # hand-off risk). Result is memo'd for later steps.
+    export_result: dict = {}
+
+    def do_export():
+        res = _export_batch_core(
+            source_id=source_id,
+            lead_ids=req.lead_ids,
+            industry_tag=req.industry_tag,
+            tier=req.tier,
+            max_rows=max_rows,
+            group_by_company=req.group_by_company,
+        )
+        export_result.update(res)
+        return f"wrote {res['rows']} rows to {res['file_name']}"
+
+    # Steps 2 & 3 need the filename from step 1 — use closures that read
+    # export_result at call time.
+    drafter = _GRAB_ROOT / "mailer" / "generate_drafts_en.py"
+    write_outlook = SCRIPTS / "write_to_outlook.py"
+
+    def _run_tracked(argv: list[str], step_name: str) -> int:
+        """Spawn a subprocess and register it into JOBS[...]['proc'] so the
+        Stop endpoint can kill it. Streams stdout into the job's log buffer."""
+        jid = current_job_id[0]
+        proc = subprocess.Popen(
+            argv, cwd=str(BASE), stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, text=True, encoding="utf-8",
+            errors="replace", bufsize=1,
+        )
+        JOBS[jid]["proc"] = proc
+        try:
+            for line in proc.stdout:
+                JOBS[jid]["logs"].append(line.rstrip())
+                if len(JOBS[jid]["logs"]) > 3000:
+                    JOBS[jid]["logs"] = JOBS[jid]["logs"][-2500:]
+            return proc.wait()
+        finally:
+            JOBS[jid].pop("proc", None)
+
+    # Because run_chain_job starts subprocesses with the argv as-is at the
+    # time of construction, we wrap the draft/outlook steps in callables that
+    # Popen themselves once the filename is known.
+    def do_drafts():
+        path = export_result.get("file")
+        if not path:
+            raise RuntimeError("Export produced no file")
+        rc = _run_tracked([PY, str(drafter), "--file", path], "drafts")
+        if JOBS[current_job_id[0]].get("stop_requested"):
+            raise RuntimeError("stopped")
+        if rc != 0:
+            raise RuntimeError(f"Drafter exited with code {rc}")
+        return "drafts generated"
+
+    def do_outlook():
+        path = export_result.get("file")
+        if not path:
+            raise RuntimeError("Export produced no file")
+        rc = _run_tracked([PY, str(write_outlook), "--file", path], "outlook")
+        if JOBS[current_job_id[0]].get("stop_requested"):
+            raise RuntimeError("stopped")
+        if rc != 0:
+            raise RuntimeError(f"write_to_outlook exited with code {rc}")
+        return f"{export_result.get('rows', 0)} drafts placed in Outlook"
+
+    current_job_id: list[str] = [""]  # filled after start_chain_job below
+    steps = [
+        {"label": "Export batch", "callable": do_export},
+        {"label": "Write drafts (Claude)", "callable": do_drafts},
+        {"label": "Place in Outlook", "callable": do_outlook},
+    ]
+    label = f"Campaign: {source_id}"
+    job_id = start_chain_job(steps, label)
+    current_job_id[0] = job_id
+    LAST_RUNS[source_id] = {
+        "kind": "campaign", "label": label,
+        "started_at": dt.datetime.now().isoformat(timespec="seconds"),
+        "job_id": job_id,
+    }
+    return {"job_id": job_id, "steps": [s["label"] for s in steps]}
+
+
+class ExportBatchReq(BaseModel):
+    lead_ids: list[int] | None = None       # if None, export all leads with verified email
+    industry_tag: str = "YC Portfolio"      # what to write in the 'industry' column
+    tier: int = 1
+    max: int = 100
+    group_by_company: bool = True           # merge co-founders into BCC
+
+
+def _title_priority(title: str) -> int:
+    """Lower number = higher priority recipient. CEO/Founder > CTO > other."""
+    t = (title or "").lower()
+    if "ceo" in t and "founder" in t: return 0
+    if "ceo" in t: return 1
+    if "founder" in t and "board" not in t: return 2
+    if "coo" in t: return 3
+    if "cto" in t: return 4
+    if "chief" in t or "chair" in t: return 5
+    if "vp" in t or "head" in t: return 6
+    return 9
+
+
+def _export_batch_core(
+    source_id: str,
+    lead_ids: list[int] | None = None,
+    industry_tag: str = "YC Portfolio",
+    tier: int = 1,
+    max_rows: int = 100,
+    group_by_company: bool = True,
+) -> dict:
+    """Callable version of export-batch — used by both the HTTP endpoint and
+    the server-side campaign pipeline. Raises RuntimeError on bad state.
+
+    `group_by_company=True` collapses multiple founders at the same company
+    into ONE email row: primary recipient by title priority (CEO > Founder >
+    CTO), co-founders placed in BCC. Reduces 30 emails to 10 for better UX
+    and deliverability."""
+    from sources_api import get_source
+    import pandas as pd
+
+    s = get_source(source_id)
+    if s.type != "grab":
+        raise RuntimeError("Export is only for grab sources")
+    if not s.db_path.exists():
+        raise RuntimeError("Source DB does not exist yet")
+
+    c = sqlite3.connect(str(s.db_path))
+    c.row_factory = sqlite3.Row
+    try:
+        where = ["f.email_status='ok'"]
+        params: list = []
+        if lead_ids:
+            placeholders = ",".join("?" * len(lead_ids))
+            where.append(f"l.id IN ({placeholders})")
+            params += lead_ids
+        sql = f"""
+            SELECT l.id as company_id, f.id as founder_id,
+                   l.company_name, l.company_domain, l.location, l.extra_data,
+                   f.full_name, f.title, f.email, f.linkedin_url
+            FROM leads l
+            JOIN founders f ON f.lead_id = l.id
+            WHERE {' AND '.join(where)}
+            ORDER BY l.id, f.id
+            LIMIT ?
+        """
+        rows = c.execute(sql, [*params, int(max_rows)]).fetchall()
+    finally:
+        c.close()
+
+    if not rows:
+        raise RuntimeError("No leads with verified emails match the selection")
+
+    # Optional: group by company_id and keep only the highest-priority founder
+    # as primary recipient; others become BCC addresses on the same row.
+    grouped: dict[int, list[dict]] = {}
+    for r in rows:
+        grouped.setdefault(r["company_id"], []).append(dict(r))
+    if group_by_company:
+        chosen: list[tuple[dict, list[dict]]] = []
+        for cid, members in grouped.items():
+            members.sort(key=lambda m: _title_priority(m.get("title") or ""))
+            primary, others = members[0], members[1:]
+            chosen.append((primary, others))
+        rows_to_write = chosen
+    else:
+        rows_to_write = [(dict(r), []) for r in rows]
+
+    today = dt.date.today().isoformat()
+    records = []
+    all_exported_members: list[tuple[int, int]] = []  # (company_id, founder_id) for exported_leads table
+    for primary, cofounders in rows_to_write:
+        r = primary
+        extra = json.loads(r["extra_data"] or "{}")
+        industry = extra.get("industry") or industry_tag
+        # Personalization context for the LLM drafter — keep small and signal-heavy.
+        meta = extra.get("company_meta") or {}
+        personalization = {
+            "one_liner": extra.get("one_liner"),
+            "long_description": (extra.get("long_description") or "")[:800],
+            "batch": extra.get("batch"),
+            "stage": extra.get("stage"),
+            "team_size": extra.get("team_size"),
+            "tags": extra.get("tags"),
+            "is_hiring": extra.get("is_hiring"),
+            "top_company": extra.get("top_company"),
+            "year_founded": meta.get("year_founded"),
+            "source": source_id,
+            # Socials the LLM might reference or recruiters might click later
+            "company_linkedin": meta.get("linkedin_url"),
+            "company_twitter": meta.get("twitter_url"),
+            "company_github": meta.get("github_url"),
+            "company_crunchbase": meta.get("crunchbase_url"),
+            "company_facebook": meta.get("facebook_url"),
+            "person_linkedin": r["linkedin_url"],
+        }
+        records.append({
+            "lead_id": f"{source_id[:2].upper()}{r['founder_id']:06d}",
+            "name": r["full_name"],
+            "salutation": "",
+            "title": r["title"] or "",
+            "company": r["company_name"],
+            "email": r["email"],
+            "phone": "",
+            "xing": "",
+            "linkedin": r["linkedin_url"] or "",
+            "industry": industry,
+            "sub_industry": extra.get("subindustry") or "",
+            "domain": r["company_domain"] or "",
+            "website": extra.get("website") or "",
+            "city": r["location"] or "",
+            "dealfront_link": "",
+            "source_file": f"{source_id}:db",
+            "tier": int(tier),
+            "is_owner": 1,
+            "created_at": dt.datetime.now().isoformat(timespec="seconds"),
+            "email_valid": 1,
+            "email_invalid_reason": "ok",
+            "email_verified_at": dt.datetime.now().isoformat(timespec="seconds"),
+            "status": "New",
+            "batch_date": today,
+            "draft_subject": "",
+            "draft_body": "",
+            "draft_language": "en",
+            "generated_at": "",
+            "outlook_entry_id": "",
+            "sent_at": "",
+            "notes": f"Imported from source={source_id}",
+            "personalization": json.dumps(personalization, ensure_ascii=False),
+            "bcc": ", ".join(cf["email"] for cf in cofounders if cf.get("email")),
+            "bcc_names": ", ".join(cf["full_name"] for cf in cofounders if cf.get("full_name")),
+        })
+        all_exported_members.append((r["company_id"], r["founder_id"]))
+        for cf in cofounders:
+            all_exported_members.append((cf["company_id"], cf["founder_id"]))
+
+    out_dir = _GRAB_ROOT / "mailer" / "batches"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"{today}_{source_id}_{len(records)}.xlsx"
+    df = pd.DataFrame(records)
+    with pd.ExcelWriter(
+        str(out_path),
+        engine="xlsxwriter",
+        engine_kwargs={"options": {"strings_to_urls": False}},
+    ) as w:
+        df.to_excel(w, sheet_name="Batch", index=False)
+
+    # Record exported leads so the UI can grey them out / exclude
+    c2 = sqlite3.connect(str(s.db_path))
+    try:
+        c2.executescript("""
+        CREATE TABLE IF NOT EXISTS exported_leads (
+            lead_id INTEGER NOT NULL,
+            founder_id INTEGER,
+            batch_file TEXT,
+            exported_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+            PRIMARY KEY (lead_id, founder_id)
+        );
+        """)
+        c2.executemany(
+            "INSERT OR IGNORE INTO exported_leads (lead_id, founder_id, batch_file) VALUES (?,?,?)",
+            [(cid, fid, out_path.name) for (cid, fid) in all_exported_members],
+        )
+        # Clear the attention flag on exported companies — user has acted on them.
+        exported_company_ids = {cid for (cid, _fid) in all_exported_members}
+        if exported_company_ids:
+            ph = ",".join("?" * len(exported_company_ids))
+            c2.execute(
+                f"UPDATE leads SET needs_attention=0 WHERE id IN ({ph})",
+                list(exported_company_ids),
+            )
+        c2.commit()
+    finally:
+        c2.close()
+
+    return {
+        "ok": True,
+        "rows": len(records),
+        "file": str(out_path),
+        "file_name": out_path.name,
+    }
+
+
+@app.post("/api/sources/{source_id}/export-batch")
+def source_export_batch(source_id: str, req: ExportBatchReq):
+    """HTTP wrapper around _export_batch_core."""
+    try:
+        res = _export_batch_core(
+            source_id=source_id,
+            lead_ids=req.lead_ids,
+            industry_tag=req.industry_tag,
+            tier=req.tier,
+            max_rows=req.max,
+            group_by_company=req.group_by_company,
+        )
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
+    res["next_step"] = (
+        "Run generate_drafts.py on this file to fill draft_subject/draft_body, "
+        "then write_to_outlook.py to push to Outlook Drafts."
+    )
+    return res
+
+
+# ---- Campaign batches per source (ready-to-run state + actions) ----
+def _grab_batches_dir() -> Path:
+    d = _GRAB_ROOT / "mailer" / "batches"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _batch_status(path: Path) -> dict:
+    """Read the Excel once and summarise its progress state. On read failure
+    still returns numeric counters (zeros) so the UI stepper doesn't render
+    NaN/NaN; the `error` field exposes the cause."""
+    import pandas as pd
+    try:
+        df = pd.read_excel(path)
+    except Exception as e:
+        return {
+            "total": 0, "drafted": 0, "in_outlook": 0, "sent": 0,
+            "state": "fresh", "error": f"read failed: {e}",
+        }
+    total = len(df)
+
+    def _filled(col: str) -> int:
+        if col not in df.columns:
+            return 0
+        s = df[col].astype(str).str.strip().str.lower()
+        mask = (s != "") & (s != "nan") & (s != "none")
+        return int(mask.sum())
+
+    drafted = _filled("draft_subject")
+    in_outlook = _filled("outlook_entry_id")
+    sent = _filled("sent_at")
+
+    if sent == total and total > 0:
+        state = "sent"
+    elif in_outlook == total and total > 0:
+        state = "in_outlook"
+    elif drafted == total and total > 0:
+        state = "drafted"
+    elif sent or in_outlook or drafted:
+        state = "partial"
+    else:
+        state = "fresh"
+
+    return {
+        "total": total,
+        "drafted": drafted,
+        "in_outlook": in_outlook,
+        "sent": sent,
+        "state": state,
+    }
+
+
+@app.get("/api/campaigns/batches")
+def all_campaign_batches():
+    """Cross-source aggregator: every batch file in `Grab Leads/mailer/batches/`
+    tagged with its source_id (parsed from filename `YYYY-MM-DD_<source>_<n>.xlsx`).
+    Powers the central Campaigns tab."""
+    from sources_api import _SOURCES
+    known = set(_SOURCES.keys())
+    d = _grab_batches_dir()
+    out = []
+    for f in sorted(d.glob("*.xlsx"), key=lambda p: p.stat().st_mtime, reverse=True):
+        # Parse source id: filename like "2026-04-20_ycombinator_3.xlsx"
+        stem = f.stem
+        parts = stem.split("_")
+        source_id = None
+        if len(parts) >= 3:
+            # Try longest known-source match (supports underscores in source ids)
+            for sid in known:
+                prefix = f"{parts[0]}_{sid}_"
+                if stem.startswith(prefix):
+                    source_id = sid
+                    break
+        if source_id is None:
+            continue  # skip orphan/legacy files not tied to a registered source
+        stat = f.stat()
+        status = _batch_status(f)
+        out.append({
+            "name": f.name,
+            "path": str(f),
+            "source": source_id,
+            "size_kb": round(stat.st_size / 1024),
+            "created_at": dt.datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"),
+            **status,
+        })
+    return {"batches": out, "count": len(out)}
+
+
+@app.get("/api/sources/{source_id}/batches")
+def source_batches(source_id: str):
+    """List batches produced from this source. Scans `Grab Leads/mailer/batches/`
+    for files whose name starts with the date prefix + source_id."""
+    from sources_api import get_source
+    get_source(source_id)  # validates registration
+    d = _grab_batches_dir()
+    out = []
+    for f in sorted(d.glob(f"*_{source_id}_*.xlsx"), reverse=True):
+        stat = f.stat()
+        status = _batch_status(f)
+        out.append({
+            "name": f.name,
+            "path": str(f),
+            "size_kb": round(stat.st_size / 1024),
+            "created_at": dt.datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"),
+            **status,
+        })
+    return {"source": source_id, "batches": out, "count": len(out)}
+
+
+def _resolve_grab_batch(source_id: str, name: str) -> Path:
+    from sources_api import get_source
+    get_source(source_id)
+    d = _grab_batches_dir()
+    p = (d / name).resolve()
+    if not str(p).startswith(str(d.resolve())) or not p.exists():
+        raise HTTPException(404, f"Batch file not found: {name}")
+    return p
+
+
+@app.post("/api/sources/{source_id}/batches/{name}/generate-drafts")
+def batch_generate_drafts(source_id: str, name: str):
+    p = _resolve_grab_batch(source_id, name)
+    # Grab sources use the English template drafter (signal-aware).
+    drafter = _GRAB_ROOT / "mailer" / "generate_drafts_en.py"
+    argv = [PY, str(drafter), "--file", str(p)]
+    job_id = start_job(argv, f"Generate drafts: {name}")
+    return {"job_id": job_id}
+
+
+@app.post("/api/sources/{source_id}/batches/{name}/write-outlook")
+def batch_write_outlook(source_id: str, name: str):
+    p = _resolve_grab_batch(source_id, name)
+    argv = [PY, str(SCRIPTS / "write_to_outlook.py"), "--file", str(p)]
+    job_id = start_job(argv, f"Write Outlook drafts: {name}")
+    return {"job_id": job_id}
+
+
+class SendBatchReq(BaseModel):
+    count: int = 10
+
+
+@app.post("/api/sources/{source_id}/batches/{name}/send")
+def batch_send(source_id: str, name: str, req: SendBatchReq):
+    p = _resolve_grab_batch(source_id, name)
+    # Guard: nothing to send if the batch is already fully sent. Avoids
+    # spawning a no-op Outlook COM process that can surface a confusing error.
+    status = _batch_status(p)
+    total = status.get("total") or 0
+    sent = status.get("sent") or 0
+    remaining = max(0, total - sent)
+    if remaining == 0:
+        raise HTTPException(400, f"Batch '{name}' is fully sent ({sent}/{total}).")
+    count = max(1, min(int(req.count), remaining))
+    argv = [PY, str(SCRIPTS / "send_drafts.py"), "--file", str(p), "--count", str(count)]
+    job_id = start_job(argv, f"Send {count} drafts: {name}")
+    return {"job_id": job_id, "count": count, "remaining_before": remaining}
+
+
+@app.delete("/api/sources/{source_id}/batches/{name}")
+def batch_delete(source_id: str, name: str):
+    p = _resolve_grab_batch(source_id, name)
+    p.unlink()
+    return {"ok": True, "deleted": name}
+
+
+@app.post("/api/sources/{source_id}/reset-all")
+def source_reset_all(source_id: str):
+    """Destructive: wipes this source's DB, raw dumps, logs, and any batch
+    files whose name starts with this source_id. Use while iterating/testing."""
+    from sources_api import get_source
+    s = get_source(source_id)
+    if s.type != "grab":
+        raise HTTPException(400, "Reset is only for grab-type sources")
+
+    removed = {"db_rows": 0, "raw_files": 0, "logs": 0, "batches": 0}
+
+    # 1. Wipe DB contents (safer than deleting the file on Windows where
+    # SQLite/antivirus may hold a transient lock). Keeps the file + schema.
+    if s.db_path.exists():
+        try:
+            c = sqlite3.connect(str(s.db_path))
+            try:
+                tables = ("exported_leads", "founders", "leads")  # FK order
+                total = 0
+                for t in tables:
+                    exists = c.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                        (t,),
+                    ).fetchone()
+                    if exists:
+                        cur = c.execute(f"DELETE FROM {t}")
+                        total += cur.rowcount or 0
+                # Reset AUTOINCREMENT counters so next scrape starts fresh
+                try:
+                    c.execute("DELETE FROM sqlite_sequence")
+                except sqlite3.OperationalError:
+                    pass
+                c.commit()
+                removed["db_rows"] = total
+            finally:
+                c.close()
+            # VACUUM to reclaim file space (optional, best-effort)
+            try:
+                c2 = sqlite3.connect(str(s.db_path))
+                c2.execute("VACUUM")
+                c2.close()
+            except Exception:
+                pass
+        except Exception as e:
+            raise HTTPException(500, f"Could not wipe DB: {e}")
+
+    # 2. Raw dumps
+    raw_dir = s.db_path.parent / "raw"
+    if raw_dir.exists():
+        for f in raw_dir.glob("*.json"):
+            try:
+                f.unlink()
+                removed["raw_files"] += 1
+            except Exception:
+                pass
+
+    # 3. Logs for this source
+    logs_dir = _GRAB_ROOT / "logs"
+    if logs_dir.exists():
+        for f in logs_dir.glob(f"{source_id}_*.log"):
+            try:
+                f.unlink()
+                removed["logs"] += 1
+            except Exception:
+                pass
+
+    # 4. Batch files
+    batches_dir = _grab_batches_dir()
+    for f in batches_dir.glob(f"*_{source_id}_*.xlsx"):
+        try:
+            f.unlink()
+            removed["batches"] += 1
+        except Exception:
+            pass
+
+    return {"ok": True, "source": source_id, "removed": removed}
+
+
 # ---- DB helpers ----
 def conn():
     c = sqlite3.connect(DB)
@@ -71,6 +783,7 @@ def run_script_job(job_id: str, argv: list[str]):
     """Run a Python script as subprocess, capture stdout live into JOBS[job_id]."""
     JOBS[job_id]["status"] = "running"
     JOBS[job_id]["logs"] = []
+    proc = None
     try:
         proc = subprocess.Popen(
             argv,
@@ -83,20 +796,141 @@ def run_script_job(job_id: str, argv: list[str]):
             bufsize=1,
         )
         JOBS[job_id]["pid"] = proc.pid
+        JOBS[job_id]["proc"] = proc   # handle for stop
         for line in proc.stdout:
             JOBS[job_id]["logs"].append(line.rstrip())
             # cap logs
             if len(JOBS[job_id]["logs"]) > 2000:
                 JOBS[job_id]["logs"] = JOBS[job_id]["logs"][-1500:]
         rc = proc.wait()
-        JOBS[job_id]["status"] = "done" if rc == 0 else "error"
+        if JOBS[job_id].get("stop_requested"):
+            JOBS[job_id]["status"] = "stopped"
+        else:
+            JOBS[job_id]["status"] = "done" if rc == 0 else "error"
         JOBS[job_id]["returncode"] = rc
     except Exception as e:
         JOBS[job_id]["status"] = "error"
         JOBS[job_id]["error"] = str(e)
     finally:
         JOBS[job_id]["ended_at"] = dt.datetime.now().isoformat(timespec="seconds")
+        JOBS[job_id].pop("proc", None)
         _evict_old_jobs()
+
+
+# Per-source "last run" so Resume can replay the same argv+label
+LAST_RUNS: dict[str, dict] = {}
+
+
+@app.post("/api/jobs/{job_id}/stop")
+def job_stop(job_id: str):
+    j = JOBS.get(job_id)
+    if not j:
+        raise HTTPException(404, "job not found")
+    if j.get("status") not in ("queued", "running"):
+        return {"ok": False, "status": j.get("status"), "note": "job already finished"}
+    j["stop_requested"] = True
+    proc = j.get("proc")
+    if proc is not None:
+        try:
+            # Windows: kill whole process tree to catch orphaned children
+            if os.name == "nt":
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                    capture_output=True,
+                )
+            else:
+                proc.terminate()
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+    return {"ok": True, "job_id": job_id, "stopped": True}
+
+
+import re as _re
+
+_SCRAPE_PAGE = _re.compile(r"Fetching page (\d+)")
+_SCRAPE_TOTAL = _re.compile(r"Total matches: (\d+) \(across (\d+) pages\)")
+_ENRICH_TOTAL = _re.compile(r"Processing (\d+) companies")
+_ENRICH_ROW = _re.compile(r"^\s*\[(\d+)\]")
+
+
+def _parse_progress(kind: str, logs: list[str]) -> dict:
+    """Best-effort progress extraction from streamed stdout."""
+    total: int | None = None
+    current: int | None = None
+    last_line = (logs[-1] if logs else "")[:200]
+
+    if kind == "scrape":
+        for line in logs:
+            m = _SCRAPE_TOTAL.search(line)
+            if m:
+                total = int(m.group(2))  # total pages
+        pages_seen = [int(m.group(1)) for line in logs
+                      if (m := _SCRAPE_PAGE.search(line))]
+        if pages_seen:
+            current = max(pages_seen) + 1
+        unit = "pages"
+    elif kind == "enrich":
+        for line in logs:
+            m = _ENRICH_TOTAL.search(line)
+            if m:
+                total = int(m.group(1))
+        rows_seen = [int(m.group(1)) for line in logs
+                     if (m := _ENRICH_ROW.search(line))]
+        if rows_seen:
+            current = max(rows_seen)
+        unit = "companies"
+    else:
+        unit = ""
+
+    percent = None
+    if total and current is not None:
+        percent = min(100, round((current / total) * 100))
+
+    return {
+        "current": current, "total": total, "percent": percent,
+        "unit": unit, "last_line": last_line,
+    }
+
+
+@app.get("/api/sources/{source_id}/last-run")
+def source_last_run(source_id: str):
+    """Return the most recent scrape/enrich invocation for this source, if any."""
+    info = LAST_RUNS.get(source_id)
+    if not info:
+        return {"exists": False}
+    # Attach job state if still tracked
+    job = JOBS.get(info.get("job_id") or "")
+    progress = None
+    if job and job.get("status") in ("queued", "running"):
+        progress = _parse_progress(info.get("kind", ""), job.get("logs", []))
+    return {
+        "exists": True,
+        "kind": info.get("kind"),
+        "argv": info.get("argv"),
+        "label": info.get("label"),
+        "started_at": info.get("started_at"),
+        "job_id": info.get("job_id"),
+        "status": (job or {}).get("status"),
+        "progress": progress,
+    }
+
+
+@app.post("/api/sources/{source_id}/resume-last")
+def source_resume_last(source_id: str):
+    """Re-run the last scrape/enrich argv for this source. Safe because both
+    scraper and enricher dedupe via UNIQUE constraint / --only-missing."""
+    info = LAST_RUNS.get(source_id)
+    if not info or not info.get("argv"):
+        raise HTTPException(400, "No previous run to resume")
+    argv = list(info["argv"])
+    label = f"Resume {info.get('kind','job')}: {source_id}"
+    job_id = start_job(argv, label)
+    LAST_RUNS[source_id] = {
+        **info,
+        "job_id": job_id,
+        "started_at": dt.datetime.now().isoformat(timespec="seconds"),
+    }
+    return {"job_id": job_id, "argv": argv}
 
 
 def _evict_old_jobs():
@@ -137,6 +971,261 @@ def start_job(argv: list[str], label: str) -> str:
     t = threading.Thread(target=run_script_job, args=(job_id, argv), daemon=True)
     t.start()
     return job_id
+
+
+# ---- Chain job: one job_id, N sequential steps ----
+ChainStep = dict  # {"label": "scrape", "argv": [...] } OR {"label": "export", "callable": fn}
+
+
+def run_chain_job(job_id: str, steps: list[ChainStep]):
+    """Run steps sequentially under ONE job_id. A step can be an argv subprocess
+    or an in-process Python callable. Any step failure aborts the chain."""
+    JOBS[job_id]["status"] = "running"
+    JOBS[job_id]["logs"] = []
+    JOBS[job_id]["step_total"] = len(steps)
+    JOBS[job_id]["step_index"] = 0
+    JOBS[job_id]["step_label"] = ""
+
+    def _log(s: str):
+        JOBS[job_id]["logs"].append(s)
+        if len(JOBS[job_id]["logs"]) > 3000:
+            JOBS[job_id]["logs"] = JOBS[job_id]["logs"][-2500:]
+
+    try:
+        for idx, step in enumerate(steps, start=1):
+            if JOBS[job_id].get("stop_requested"):
+                JOBS[job_id]["status"] = "stopped"
+                return
+            JOBS[job_id]["step_index"] = idx
+            JOBS[job_id]["step_label"] = step.get("label", f"step {idx}")
+            _log(f"\n=== [{idx}/{len(steps)}] {JOBS[job_id]['step_label']} ===")
+
+            argv = step.get("argv")
+            fn = step.get("callable")
+            if argv:
+                try:
+                    proc = subprocess.Popen(
+                        argv, cwd=str(BASE), stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT, text=True, encoding="utf-8",
+                        errors="replace", bufsize=1,
+                    )
+                    JOBS[job_id]["proc"] = proc
+                    for line in proc.stdout:
+                        _log(line.rstrip())
+                    rc = proc.wait()
+                    if JOBS[job_id].get("stop_requested"):
+                        JOBS[job_id]["status"] = "stopped"
+                        return
+                    if rc != 0:
+                        JOBS[job_id]["status"] = "error"
+                        JOBS[job_id]["returncode"] = rc
+                        _log(f"Step failed with code {rc}")
+                        return
+                finally:
+                    JOBS[job_id].pop("proc", None)
+            elif fn:
+                try:
+                    result = fn()
+                    JOBS[job_id].setdefault("step_results", {})[
+                        JOBS[job_id]["step_label"]
+                    ] = result
+                    _log(f"OK: {result}")
+                except Exception as e:
+                    if JOBS[job_id].get("stop_requested") or str(e) == "stopped":
+                        JOBS[job_id]["status"] = "stopped"
+                        _log("[STOPPED] by user")
+                        return
+                    JOBS[job_id]["status"] = "error"
+                    JOBS[job_id]["error"] = str(e)
+                    _log(f"Callable failed: {e}")
+                    return
+            else:
+                JOBS[job_id]["status"] = "error"
+                _log(f"Step {idx} has no argv/callable")
+                return
+
+        JOBS[job_id]["status"] = "done"
+        JOBS[job_id]["returncode"] = 0
+    except Exception as e:
+        JOBS[job_id]["status"] = "error"
+        JOBS[job_id]["error"] = str(e)
+        _log(f"Chain exception: {e}")
+    finally:
+        JOBS[job_id]["ended_at"] = dt.datetime.now().isoformat(timespec="seconds")
+        _evict_old_jobs()
+
+
+def start_chain_job(steps: list[ChainStep], label: str) -> str:
+    job_id = str(uuid.uuid4())[:8]
+    JOBS[job_id] = {
+        "id": job_id,
+        "label": label,
+        "status": "queued",
+        "started_at": dt.datetime.now().isoformat(timespec="seconds"),
+        "logs": [],
+        "step_total": len(steps),
+        "step_index": 0,
+        "step_label": "",
+    }
+    t = threading.Thread(target=run_chain_job, args=(job_id, steps), daemon=True)
+    t.start()
+    return job_id
+
+
+# ---- Daily auto-scrape scheduler ------------------------------------------
+# Lightweight: one background thread checks every 60s whether any source's
+# schedule window (hour:minute, local time) has been hit today and isn't yet
+# fired. Schedules are persisted to schedules.json so they survive restart.
+
+SCHEDULES_FILE = Path(__file__).parent / "schedules.json"
+
+
+def _load_schedules() -> dict:
+    if not SCHEDULES_FILE.exists():
+        return {}
+    try:
+        return json.loads(SCHEDULES_FILE.read_text(encoding="utf-8"))
+    except Exception as e:
+        # Preserve the corrupt file before returning an empty config so user
+        # doesn't silently lose their schedule.
+        print(f"[scheduler] schedules.json corrupt ({e}); renaming to .corrupt")
+        try:
+            SCHEDULES_FILE.rename(SCHEDULES_FILE.with_suffix(".json.corrupt"))
+        except Exception:
+            pass
+        return {}
+
+
+def _save_schedules(data: dict) -> None:
+    SCHEDULES_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+def _fire_auto_collect(source_id: str) -> str | None:
+    """Kick off the standard collect (scrape -> enrich) chain for a source."""
+    try:
+        from sources_api import get_source
+        s = get_source(source_id)
+        if s.type != "grab":
+            return None
+        schema = s.load_schema()
+        scraper_rel = (schema.get("scraper") or {}).get("path")
+        if not scraper_rel:
+            return None
+        enricher = schema.get("enricher") or {}
+        enricher_rel = enricher.get("path") or "common/enrich.py"
+        enricher_default = list(enricher.get("default_args") or ["--source", source_id])
+
+        scrape_argv = [PY, str(_GRAB_ROOT / scraper_rel), *_schema_flag_args(schema, {})]
+        enrich_argv = [PY, str(_GRAB_ROOT / enricher_rel), *enricher_default]
+        steps = [
+            {"label": "Scrape companies", "argv": scrape_argv},
+            {"label": "Enrich founders", "argv": enrich_argv},
+        ]
+        label = f"Auto-collect: {source_id}"
+        job_id = start_chain_job(steps, label)
+        LAST_RUNS[source_id] = {
+            "kind": "collect", "chain": steps, "label": label,
+            "started_at": dt.datetime.now().isoformat(timespec="seconds"),
+            "job_id": job_id,
+        }
+        return job_id
+    except Exception as e:
+        print(f"[scheduler] fire failed for {source_id}: {e}")
+        return None
+
+
+def _scheduler_loop():
+    """Every 60s, check each enabled schedule. If hour:minute matches and we
+    haven't already fired today, kick off the collect chain."""
+    import time as _time
+    while True:
+        try:
+            data = _load_schedules()
+            now = dt.datetime.now()
+            today = now.date().isoformat()
+            dirty = False
+            for source_id, cfg in list(data.items()):
+                if not cfg.get("enabled"):
+                    continue
+                hh = int(cfg.get("hour", 2))
+                mm = int(cfg.get("minute", 0))
+                last = cfg.get("last_fired_date")
+                if last == today:
+                    continue  # already fired today
+                if now.hour > hh or (now.hour == hh and now.minute >= mm):
+                    job_id = _fire_auto_collect(source_id)
+                    if job_id:
+                        cfg["last_fired_date"] = today
+                        cfg["last_fired_at"] = now.isoformat(timespec="seconds")
+                        cfg["last_job_id"] = job_id
+                        dirty = True
+            if dirty:
+                _save_schedules(data)
+        except Exception as e:
+            print(f"[scheduler] loop error: {e}")
+        _time.sleep(60)
+
+
+@app.on_event("startup")
+def _start_scheduler():
+    t = threading.Thread(target=_scheduler_loop, daemon=True)
+    t.start()
+
+
+class AutoRunReq(BaseModel):
+    enabled: bool
+    hour: int = 2       # local hour 0-23
+    minute: int = 0     # 0-59
+
+
+@app.get("/api/sources/{source_id}/auto-run")
+def get_auto_run(source_id: str):
+    from sources_api import get_source
+    get_source(source_id)
+    data = _load_schedules()
+    cfg = data.get(source_id) or {"enabled": False, "hour": 2, "minute": 0}
+    # Compute next-fire hint
+    now = dt.datetime.now()
+    next_fire = None
+    if cfg.get("enabled"):
+        today_slot = now.replace(hour=int(cfg.get("hour", 2)), minute=int(cfg.get("minute", 0)), second=0, microsecond=0)
+        next_fire = (
+            today_slot if today_slot > now and cfg.get("last_fired_date") != now.date().isoformat()
+            else today_slot + dt.timedelta(days=1)
+        ).isoformat(timespec="seconds")
+    return {**cfg, "source": source_id, "next_fire": next_fire}
+
+
+@app.post("/api/sources/{source_id}/auto-run")
+def set_auto_run(source_id: str, req: AutoRunReq):
+    from sources_api import get_source
+    s = get_source(source_id)
+    if s.type != "grab":
+        raise HTTPException(400, "Auto-run is only for grab sources")
+    if not (0 <= req.hour <= 23 and 0 <= req.minute <= 59):
+        raise HTTPException(400, "hour/minute out of range")
+    data = _load_schedules()
+    prior = data.get(source_id, {})
+    cfg = {
+        **prior,
+        "enabled": bool(req.enabled),
+        "hour": int(req.hour),
+        "minute": int(req.minute),
+    }
+    # If the configured time has already passed today, mark it as "fired today"
+    # so the scheduler bumps the next fire to tomorrow instead of firing in the
+    # next 60s. User's intent when enabling at 10am with hh=02 is tomorrow 2am.
+    if cfg["enabled"]:
+        now = dt.datetime.now()
+        today_slot = now.replace(
+            hour=cfg["hour"], minute=cfg["minute"], second=0, microsecond=0
+        )
+        if today_slot <= now:
+            cfg["last_fired_date"] = now.date().isoformat()
+            cfg.setdefault("last_fired_at", None)
+    data[source_id] = cfg
+    _save_schedules(data)
+    return get_auto_run(source_id)
 
 
 # ---- Read endpoints ----
@@ -188,6 +1277,89 @@ def stats():
         "remaining_today": max(0, DAILY_QUOTA - q_one(
             "SELECT COUNT(*) FROM emails_sent WHERE DATE(sent_at)=?", today
         )),
+    }
+
+
+@app.get("/api/overview")
+def overview():
+    """Cross-source aggregate for the main Overview page. Combines Marcel's
+    DB stats with grab-source batch file counts so "sent today", "drafted",
+    and total leads reflect every source in one view."""
+    today = dt.date.today().isoformat()
+
+    # --- Marcel side (DB-driven) ---
+    marcel_total_sent = q_one("SELECT COUNT(*) FROM emails_sent WHERE sent_at IS NOT NULL")
+    marcel_sent_today = q_one(
+        "SELECT COUNT(*) FROM emails_sent WHERE DATE(sent_at)=?", today
+    )
+    marcel_drafted = q_one(
+        "SELECT COUNT(*) FROM lead_status "
+        "WHERE status IN ('Drafted','DraftedInOutlook')"
+    )
+    marcel_leads = q_one("SELECT COUNT(*) FROM leads")
+    total_replies = q_one("SELECT COUNT(*) FROM replies")
+    positive = q_one("SELECT COUNT(*) FROM replies WHERE sentiment='Positive'")
+    hot_pending = q_one(
+        "SELECT COUNT(*) FROM replies WHERE handled=0 "
+        "AND sentiment IN ('Positive','Objection')"
+    )
+
+    # --- Grab sources (scan per-source DB + batch files) ---
+    import pandas as pd
+    from sources_api import _SOURCES
+
+    grab_leads = 0
+    grab_drafted = 0
+    grab_sent_today = 0
+    grab_total_sent = 0
+    leads_by_source: dict[str, int] = {"marcel": marcel_leads}
+    for sid, src in _SOURCES.items():
+        if src.type != "grab":
+            continue
+        per_source = 0
+        if src.db_path.exists():
+            try:
+                c = sqlite3.connect(str(src.db_path))
+                per_source = c.execute("SELECT COUNT(*) FROM leads").fetchone()[0]
+                c.close()
+            except Exception:
+                pass
+        leads_by_source[sid] = per_source
+        grab_leads += per_source
+        # Scan this source's batch files
+        for f in _grab_batches_dir().glob(f"*_{sid}_*.xlsx"):
+            try:
+                df = pd.read_excel(f)
+                if "draft_subject" in df.columns:
+                    s = df["draft_subject"].astype(str).str.strip().str.lower()
+                    grab_drafted += int(((s != "") & (s != "nan") & (s != "none")).sum())
+                if "sent_at" in df.columns:
+                    sent_series = pd.to_datetime(df["sent_at"], errors="coerce")
+                    grab_total_sent += int(sent_series.notna().sum())
+                    grab_sent_today += int(
+                        (sent_series.dt.date.astype(str) == today).sum()
+                    )
+            except Exception:
+                pass
+
+    total_sent = marcel_total_sent + grab_total_sent
+    sent_today = marcel_sent_today + grab_sent_today
+    reply_rate = (total_replies / total_sent * 100) if total_sent else 0
+    positive_rate = (positive / total_sent * 100) if total_sent else 0
+
+    return {
+        "total_leads": marcel_leads + grab_leads,
+        "leads_by_source": leads_by_source,
+        "drafted": marcel_drafted + grab_drafted,
+        "total_sent": total_sent,
+        "sent_today": sent_today,
+        "total_replies": total_replies,
+        "hot_pending": hot_pending,
+        "reply_rate_pct": round(reply_rate, 2),
+        "positive_rate_pct": round(positive_rate, 2),
+        "daily_quota": DAILY_QUOTA,
+        "remaining_today": max(0, DAILY_QUOTA - sent_today),
+        "has_replies": total_replies > 0,
     }
 
 
@@ -669,8 +1841,10 @@ def job_status(job_id: str):
     j = JOBS.get(job_id)
     if not j:
         raise HTTPException(404)
-    # Return a compact view, last 200 log lines
-    return {**j, "logs": j.get("logs", [])[-200:]}
+    # Drop non-serialisable internals (subprocess handle). Cap logs.
+    out = {k: v for k, v in j.items() if k not in ("proc",)}
+    out["logs"] = j.get("logs", [])[-200:]
+    return out
 
 
 @app.get("/api/jobs")

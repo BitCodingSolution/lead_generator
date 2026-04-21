@@ -1,26 +1,15 @@
 "use client"
 
 import useSWR from "swr"
+import Link from "next/link"
 import { swrFetcher } from "@/lib/api"
-import type {
-  Stats,
-  FunnelStage,
-  DailyActivity,
-  IndustryRow,
-  HotLead,
-  RecentSent,
-} from "@/lib/types"
+import type { DailyActivity, HotLead, RecentSent } from "@/lib/types"
+import { BatchesSummary } from "@/components/batches-panel"
 import { KpiCard } from "@/components/kpi-card"
 import { PageHeader } from "@/components/page-header"
 import { StatusChip } from "@/components/status-chip"
 import { EmptyState } from "@/components/empty-state"
-import { FunnelChart } from "@/components/charts/funnel"
-import {
-  SentimentDonut,
-  SentimentLegend,
-} from "@/components/charts/sentiment-donut"
 import { ActivityArea } from "@/components/charts/activity-area"
-import { IndustryBar } from "@/components/charts/industry-bar"
 import {
   Mail,
   MessageSquareReply,
@@ -32,25 +21,33 @@ import {
   Zap,
 } from "lucide-react"
 import { fmt, pct, relTime, truncate } from "@/lib/utils"
-import Link from "next/link"
+
+type OverviewStats = {
+  total_leads: number
+  leads_by_source: Record<string, number>
+  drafted: number
+  total_sent: number
+  sent_today: number
+  total_replies: number
+  hot_pending: number
+  reply_rate_pct: number
+  positive_rate_pct: number
+  daily_quota: number
+  remaining_today: number
+  has_replies: boolean
+}
 
 export default function OverviewPage() {
-  const { data: stats, isLoading: statsLoading } = useSWR<Stats>(
-    "/api/stats",
+  const { data: stats, isLoading: statsLoading } = useSWR<OverviewStats>(
+    "/api/overview",
     swrFetcher,
     { refreshInterval: 30000 },
   )
-  const { data: funnel } = useSWR<FunnelStage[]>("/api/funnel", swrFetcher, {
-    refreshInterval: 60000,
-  })
   const { data: daily } = useSWR<DailyActivity[]>(
     "/api/daily-activity?days=30",
     swrFetcher,
     { refreshInterval: 60000 },
   )
-  const { data: industries } = useSWR<IndustryRow[]>("/api/industries", swrFetcher, {
-    refreshInterval: 120000,
-  })
   const { data: hot } = useSWR<HotLead[]>("/api/hot-leads?limit=8", swrFetcher, {
     refreshInterval: 30000,
   })
@@ -61,37 +58,54 @@ export default function OverviewPage() {
   )
 
   const quotaUsed = stats ? stats.daily_quota - stats.remaining_today : 0
-  const quotaPct = stats && stats.daily_quota > 0
-    ? Math.min(100, (quotaUsed / stats.daily_quota) * 100)
-    : 0
-
-  const topIndustries = (industries || [])
-    .slice()
-    .sort((a, b) => b.sent - a.sent)
-    .slice(0, 8)
+  const quotaPct =
+    stats && stats.daily_quota > 0
+      ? Math.min(100, (quotaUsed / stats.daily_quota) * 100)
+      : 0
 
   return (
     <div className="space-y-8">
       <PageHeader
         title="Outreach Overview"
-        subtitle="Daily state of the pipeline — drafts, sends, and replies at a glance."
+        subtitle="Daily state of the pipeline across all sources — drafts, sends, and replies at a glance."
         actions={
           <Link
             href="/campaigns"
             className="inline-flex items-center gap-1.5 rounded-md bg-[hsl(250_80%_62%)] hover:bg-[hsl(250_80%_58%)] text-white text-sm px-3 py-1.5 transition-colors shadow-[0_0_0_1px_rgba(255,255,255,0.05)]"
           >
             <Zap className="size-3.5" />
-            Run a campaign
+            Open Campaigns
           </Link>
         }
       />
 
-      {/* KPI grid */}
+      {/* Campaign activity (cross-source batch counters) */}
+      <div className="space-y-2">
+        <div className="flex items-end justify-between">
+          <div>
+            <div className="text-xs font-medium uppercase tracking-[0.1em] text-zinc-500">
+              Campaign activity
+            </div>
+            <div className="text-sm text-zinc-300 mt-0.5">
+              Batches currently in flight across all sources
+            </div>
+          </div>
+          <Link
+            href="/campaigns"
+            className="text-xs text-zinc-400 hover:text-zinc-200"
+          >
+            Manage →
+          </Link>
+        </div>
+        <BatchesSummary scope={{ kind: "all" }} />
+      </div>
+
+      {/* KPI grid — cross-source */}
       <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
         <KpiCard
           label="Total leads"
           value={stats?.total_leads}
-          hint={`${fmt(stats?.new_leads ?? 0)} new · ${fmt(stats?.picked ?? 0)} picked`}
+          hint="All sources combined"
           icon={<Users className="size-4" />}
           accent="violet"
           loading={statsLoading}
@@ -100,16 +114,16 @@ export default function OverviewPage() {
         <KpiCard
           label="Drafted"
           value={stats?.drafted}
-          hint="Ready to send"
+          hint="Ready in batches"
           icon={<Mail className="size-4" />}
           accent="sky"
           loading={statsLoading}
           index={1}
         />
         <KpiCard
-          label="Sent (all time)"
-          value={stats?.total_sent}
-          hint={`${fmt(stats?.sent_today ?? 0)} today`}
+          label="Sent today"
+          value={stats?.sent_today}
+          hint={`${fmt(stats?.total_sent ?? 0)} all time`}
           icon={<Send className="size-4" />}
           accent="violet"
           loading={statsLoading}
@@ -118,16 +132,16 @@ export default function OverviewPage() {
         <KpiCard
           label="Replies"
           value={stats?.total_replies}
-          hint={`${fmt(stats?.replies_today ?? 0)} today`}
+          hint={`${pct(stats?.reply_rate_pct)} rate`}
           icon={<MessageSquareReply className="size-4" />}
           accent="emerald"
           loading={statsLoading}
           index={3}
         />
         <KpiCard
-          label="Reply rate"
-          value={pct(stats?.reply_rate_pct)}
-          hint={`${pct(stats?.positive_rate_pct)} positive`}
+          label="Positive rate"
+          value={pct(stats?.positive_rate_pct)}
+          hint="Of all sends"
           icon={<Target className="size-4" />}
           accent="amber"
           loading={statsLoading}
@@ -144,7 +158,7 @@ export default function OverviewPage() {
         />
       </div>
 
-      {/* Quota + Activity */}
+      {/* Daily quota (cross-source) + Daily activity chart */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <div className="rounded-xl border border-zinc-800/80 bg-[#18181b] p-5">
           <div className="flex items-center justify-between mb-3">
@@ -158,6 +172,9 @@ export default function OverviewPage() {
                   {" / "}
                   {fmt(stats?.daily_quota ?? 0)}
                 </span>
+              </div>
+              <div className="text-[11px] text-zinc-500 mt-1">
+                All sources combined
               </div>
             </div>
             <div className="text-right">
@@ -175,16 +192,6 @@ export default function OverviewPage() {
               style={{ width: `${quotaPct}%` }}
             />
           </div>
-          <div className="mt-4 grid grid-cols-2 gap-3">
-            <div className="rounded-md border border-zinc-800/80 bg-zinc-900/40 px-3 py-2">
-              <div className="text-[10px] uppercase tracking-[0.1em] text-zinc-500">Tier 1</div>
-              <div className="text-sm font-medium tnum text-zinc-200 mt-0.5">{fmt(stats?.tier1 ?? 0)}</div>
-            </div>
-            <div className="rounded-md border border-zinc-800/80 bg-zinc-900/40 px-3 py-2">
-              <div className="text-[10px] uppercase tracking-[0.1em] text-zinc-500">Tier 2</div>
-              <div className="text-sm font-medium tnum text-zinc-200 mt-0.5">{fmt(stats?.tier2 ?? 0)}</div>
-            </div>
-          </div>
         </div>
 
         <div className="rounded-xl border border-zinc-800/80 bg-[#18181b] p-5 lg:col-span-2">
@@ -197,7 +204,8 @@ export default function OverviewPage() {
             </div>
             <div className="flex items-center gap-3 text-[11px]">
               <span className="inline-flex items-center gap-1.5 text-zinc-400">
-                <span className="size-2 rounded-full bg-[hsl(250_80%_62%)]" /> Sent
+                <span className="size-2 rounded-full bg-[hsl(250_80%_62%)]" />{" "}
+                Sent
               </span>
               <span className="inline-flex items-center gap-1.5 text-zinc-400">
                 <span className="size-2 rounded-full bg-emerald-400" /> Replies
@@ -214,54 +222,6 @@ export default function OverviewPage() {
         </div>
       </div>
 
-      {/* Funnel + Sentiment */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        <div className="rounded-xl border border-zinc-800/80 bg-[#18181b] p-5 lg:col-span-2">
-          <div className="mb-4">
-            <div className="text-xs font-medium uppercase tracking-[0.1em] text-zinc-500">
-              Funnel
-            </div>
-            <div className="text-sm text-zinc-300 mt-0.5">Stage-by-stage throughput</div>
-          </div>
-          {funnel?.length ? (
-            <FunnelChart data={funnel} />
-          ) : (
-            <EmptyState
-              icon={<Target className="size-5" />}
-              title="Funnel is empty"
-              hint="Pick a batch from Campaigns to start generating drafts."
-            />
-          )}
-        </div>
-
-        <div className="rounded-xl border border-zinc-800/80 bg-[#18181b] p-5">
-          <div className="mb-2">
-            <div className="text-xs font-medium uppercase tracking-[0.1em] text-zinc-500">
-              Sentiment mix
-            </div>
-            <div className="text-sm text-zinc-300 mt-0.5">Reply breakdown</div>
-          </div>
-          <SentimentDonut
-            positive={stats?.positive ?? 0}
-            objection={stats?.objection ?? 0}
-            neutral={stats?.neutral ?? 0}
-            negative={stats?.negative ?? 0}
-            ooo={stats?.ooo ?? 0}
-            bounce={stats?.bounce ?? 0}
-          />
-          <SentimentLegend
-            items={[
-              { label: "Positive", value: stats?.positive ?? 0, color: "#34d399" },
-              { label: "Objection", value: stats?.objection ?? 0, color: "#fbbf24" },
-              { label: "Neutral", value: stats?.neutral ?? 0, color: "#a1a1aa" },
-              { label: "Negative", value: stats?.negative ?? 0, color: "#fb7185" },
-              { label: "OOO", value: stats?.ooo ?? 0, color: "#38bdf8" },
-              { label: "Bounce", value: stats?.bounce ?? 0, color: "#f43f5e" },
-            ]}
-          />
-        </div>
-      </div>
-
       {/* Hot + Recent tables */}
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
         <div className="rounded-xl border border-zinc-800/80 bg-[#18181b]">
@@ -270,16 +230,24 @@ export default function OverviewPage() {
               <div className="text-xs font-medium uppercase tracking-[0.1em] text-zinc-500">
                 Hot leads
               </div>
-              <div className="text-sm text-zinc-300 mt-0.5">Unhandled replies needing attention</div>
+              <div className="text-sm text-zinc-300 mt-0.5">
+                Unhandled replies needing attention
+              </div>
             </div>
-            <Link href="/replies" className="text-xs text-zinc-400 hover:text-zinc-200">
+            <Link
+              href="/replies"
+              className="text-xs text-zinc-400 hover:text-zinc-200"
+            >
               View all →
             </Link>
           </div>
           <div className="divide-y divide-zinc-800/60">
             {hot && hot.length > 0 ? (
               hot.map((h) => (
-                <div key={h.id} className="px-5 py-3 hover:bg-zinc-800/30 transition-colors">
+                <div
+                  key={h.id}
+                  className="px-5 py-3 hover:bg-zinc-800/30 transition-colors"
+                >
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
                       <div className="flex items-center gap-2 flex-wrap">
@@ -321,16 +289,24 @@ export default function OverviewPage() {
               <div className="text-xs font-medium uppercase tracking-[0.1em] text-zinc-500">
                 Recently sent
               </div>
-              <div className="text-sm text-zinc-300 mt-0.5">Latest outgoing emails</div>
+              <div className="text-sm text-zinc-300 mt-0.5">
+                Latest outgoing emails
+              </div>
             </div>
-            <Link href="/leads" className="text-xs text-zinc-400 hover:text-zinc-200">
+            <Link
+              href="/leads"
+              className="text-xs text-zinc-400 hover:text-zinc-200"
+            >
               View leads →
             </Link>
           </div>
           <div className="divide-y divide-zinc-800/60">
             {recent && recent.length > 0 ? (
               recent.map((r, i) => (
-                <div key={i} className="px-5 py-3 hover:bg-zinc-800/30 transition-colors">
+                <div
+                  key={i}
+                  className="px-5 py-3 hover:bg-zinc-800/30 transition-colors"
+                >
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
                       <div className="flex items-center gap-2 flex-wrap">
@@ -364,35 +340,6 @@ export default function OverviewPage() {
             )}
           </div>
         </div>
-      </div>
-
-      {/* Industry breakdown */}
-      <div className="rounded-xl border border-zinc-800/80 bg-[#18181b] p-5">
-        <div className="flex items-center justify-between mb-4">
-          <div>
-            <div className="text-xs font-medium uppercase tracking-[0.1em] text-zinc-500">
-              Sent by industry
-            </div>
-            <div className="text-sm text-zinc-300 mt-0.5">Top performing verticals</div>
-          </div>
-        </div>
-        {topIndustries.length ? (
-          <IndustryBar
-            data={topIndustries as unknown as Array<Record<string, unknown>>}
-            dataKey="sent"
-            nameKey="industry"
-            colorMap={(row) => {
-              const t = Number(row.tier) || 2
-              return t === 1 ? "hsl(250 80% 62%)" : "hsl(250 40% 42%)"
-            }}
-          />
-        ) : (
-          <EmptyState
-            icon={<Users className="size-5" />}
-            title="No industries tracked yet"
-            hint="Pick a batch to populate industry stats."
-          />
-        )}
       </div>
     </div>
   )

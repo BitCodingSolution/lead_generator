@@ -4,9 +4,11 @@ import * as React from "react"
 import useSWR, { useSWRConfig } from "swr"
 import { motion } from "framer-motion"
 import { toast } from "sonner"
+import { useSearchParams } from "next/navigation"
 import { api, swrFetcher } from "@/lib/api"
 import { useJob } from "@/hooks/useJob"
 import type { IndustryRow, Stats } from "@/lib/types"
+import { BatchesPanel, BatchesSummary } from "@/components/batches-panel"
 import { PageHeader } from "@/components/page-header"
 import { StatusChip } from "@/components/status-chip"
 import { Terminal } from "@/components/terminal"
@@ -51,6 +53,17 @@ const STAGES: { key: StageKey; label: string }[] = [
 // ---------------- Page ----------------
 
 export default function CampaignsPage() {
+  // useSearchParams requires a Suspense boundary on Next 15+ for build/SSG.
+  return (
+    <React.Suspense fallback={null}>
+      <CampaignsPageInner />
+    </React.Suspense>
+  )
+}
+
+function CampaignsPageInner() {
+  const searchParams = useSearchParams()
+  const highlightBatch = searchParams?.get("batch") || null
   // Data
   const { data: stats } = useSWR<Stats>("/api/stats", swrFetcher, {
     refreshInterval: 30000,
@@ -270,12 +283,15 @@ export default function CampaignsPage() {
     <div className="space-y-6">
       <PageHeader
         title="Campaigns"
-        subtitle="Run the entire outreach pipeline with a single click."
+        subtitle="Manage exported batches (all sources) + run Marcel's one-click pipeline."
       />
 
       <PendingDraftsBanner onAction={runSecondary} jobRunning={jobRunning} />
 
-      {/* ===== HERO CARD ===== */}
+      {/* ===== ALL BATCHES (cross-source, primary view) ===== */}
+      <BatchesSection highlightBatch={highlightBatch} />
+
+      {/* ===== MARCEL HERO CARD (DB-picked pipeline) ===== */}
       <motion.div
         initial={{ opacity: 0, y: 6 }}
         animate={{ opacity: 1, y: 0 }}
@@ -758,6 +774,109 @@ function WindowBadge({ schedule }: { schedule?: ScheduleInfo }) {
           closed · opens in {fmtDuration(schedule.seconds_until_open)}
         </span>
       )}
+    </div>
+  )
+}
+
+// ---------------- Cross-source Batches with source tabs ----------------
+
+type CrossBatchesResponse = {
+  batches: Array<{ name: string; source?: string; sent?: number; total?: number }>
+  count: number
+}
+
+function BatchesSection({
+  highlightBatch,
+}: {
+  highlightBatch: string | null
+}) {
+  const [selected, setSelected] = React.useState<string>("all")
+
+  // Fetch once here so tabs can show per-source counts without waiting on
+  // the child component's own fetch. SWR de-dupes the two calls for us.
+  const { data } = useSWR<CrossBatchesResponse>(
+    "/api/campaigns/batches",
+    swrFetcher,
+    { refreshInterval: 5000 },
+  )
+  const batches = data?.batches || []
+
+  // Build source list from the batches themselves — only show tabs for
+  // sources that actually have batches.
+  const perSource = React.useMemo(() => {
+    const m = new Map<string, number>()
+    for (const b of batches) {
+      const s = b.source || "unknown"
+      m.set(s, (m.get(s) || 0) + 1)
+    }
+    return Array.from(m.entries()).sort((a, b) => b[1] - a[1])
+  }, [batches])
+
+  const tabs: Array<{ id: string; label: string; count: number }> = [
+    { id: "all", label: "All", count: batches.length },
+    ...perSource.map(([id, count]) => ({
+      id,
+      label: id.charAt(0).toUpperCase() + id.slice(1),
+      count,
+    })),
+  ]
+
+  // Reset to "all" if the currently selected tab disappears (e.g. all of that
+  // source's batches deleted).
+  React.useEffect(() => {
+    if (selected !== "all" && !tabs.some((t) => t.id === selected)) {
+      setSelected("all")
+    }
+  }, [tabs, selected])
+
+  const activeFilter = selected === "all" ? undefined : selected
+
+  return (
+    <div className="space-y-3 pt-2">
+      <div className="flex items-end justify-between gap-3 pb-2 border-b border-zinc-800/60">
+        <div className="min-w-0 flex-1">
+          <div className="text-base font-semibold tracking-tight text-zinc-100">
+            All Batches
+          </div>
+          <div className="text-xs text-zinc-500 mt-0.5">
+            Every batch exported from any source — run drafts → Outlook → send here.
+          </div>
+        </div>
+        {tabs.length > 1 && (
+          <div className="flex items-center gap-1 rounded-lg border border-zinc-800 bg-zinc-900/40 p-1">
+            {tabs.map((t) => (
+              <button
+                key={t.id}
+                onClick={() => setSelected(t.id)}
+                className={cn(
+                  "inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[11px] font-medium transition-colors",
+                  selected === t.id
+                    ? "bg-[hsl(250_80%_62%/0.18)] text-[hsl(250_80%_85%)] border border-[hsl(250_80%_62%/0.3)]"
+                    : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60 border border-transparent",
+                )}
+              >
+                {t.label}
+                <span
+                  className={cn(
+                    "tnum text-[10px] rounded px-1 py-0.5",
+                    selected === t.id
+                      ? "bg-[hsl(250_80%_62%/0.2)] text-[hsl(250_80%_85%)]"
+                      : "bg-zinc-800 text-zinc-500",
+                  )}
+                >
+                  {t.count}
+                </span>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+      <BatchesSummary scope={{ kind: "all" }} sourceFilter={activeFilter} />
+      <BatchesPanel
+        scope={{ kind: "all" }}
+        sourceFilter={activeFilter}
+        highlight={highlightBatch}
+      />
     </div>
   )
 }

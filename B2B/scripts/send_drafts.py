@@ -98,6 +98,18 @@ def main():
                 # Already sent earlier — DB was not reconciled. Just backfill sent_at.
                 print(f"  [{lead_id}] already sent in Outlook, reconciling DB")
             else:
+                # Re-normalise BCC (commas -> semicolons) and resolve before Send()
+                # to avoid "Outlook does not recognize one or more names".
+                try:
+                    if getattr(item, "BCC", None):
+                        bcc = str(item.BCC)
+                        if "," in bcc:
+                            item.BCC = ";".join(
+                                p.strip() for p in bcc.replace(",", ";").split(";") if p.strip()
+                            )
+                    item.Recipients.ResolveAll()
+                except Exception as _e:
+                    print(f"  [{lead_id}] recipient resolve warning: {_e}")
                 item.Send()
             sent_ts = dt.datetime.now().isoformat(timespec='seconds')
             con.execute(
