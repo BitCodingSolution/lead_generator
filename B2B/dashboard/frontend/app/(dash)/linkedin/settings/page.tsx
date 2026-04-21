@@ -2,6 +2,8 @@ import { PageHeader } from "@/components/page-header"
 import { LinkedInSafetyCard } from "@/components/linkedin/linkedin-safety-card"
 import { LinkedInGmailConnect } from "@/components/linkedin/linkedin-gmail-connect"
 import { LinkedInExtensionKeys } from "@/components/linkedin/linkedin-extension-keys"
+import { LinkedInMaintenance } from "@/components/linkedin/linkedin-maintenance"
+import { LinkedInAutopilotStatus } from "@/components/linkedin/linkedin-autopilot-status"
 import { Puzzle } from "lucide-react"
 
 export default function LinkedInSettingsPage() {
@@ -9,12 +11,17 @@ export default function LinkedInSettingsPage() {
     <div className="space-y-6">
       <PageHeader
         title="LinkedIn Settings"
-        subtitle="Gmail connection, extension keys, safety mode, and autopilot schedule."
+        subtitle="Gmail connection, extension keys, safety mode, autopilot, and maintenance."
       />
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <LinkedInGmailConnect />
         <LinkedInSafetyCard />
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <LinkedInAutopilotStatus />
+        <LinkedInMaintenance />
       </div>
 
       <LinkedInExtensionKeys />

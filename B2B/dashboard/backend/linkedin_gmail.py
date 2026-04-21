@@ -25,8 +25,10 @@ import re
 import smtplib
 import ssl
 from dataclasses import dataclass
+from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from email import encoders
 from pathlib import Path
 from typing import Optional
 
@@ -177,28 +179,42 @@ def send_email(
     subject: str,
     body: str,
     reply_to: Optional[str] = None,
+    attachment: Optional[tuple[Path, str]] = None,
 ) -> SendResult:
+    """Send a plain-text email. If `attachment` is a (path, filename) tuple,
+    the file is attached as PDF (only PDF attachments supported — matches the
+    CV-picker design)."""
     creds = get_credentials()
     if not creds:
         raise RuntimeError("Gmail not connected")
     email_addr, app_password = creds
 
-    msg = MIMEMultipart("alternative")
+    # `mixed` when attaching, `alternative` otherwise — RFC 5322 layout.
+    msg = MIMEMultipart("mixed" if attachment else "alternative")
     msg["From"] = email_addr
     msg["To"] = to
     msg["Subject"] = subject
     msg["Date"] = email.utils.formatdate(localtime=True)
-    # make_msgid returns "<random@domain>" with angle brackets. Keep them on
-    # the outgoing header (RFC 5322 requires), but strip for storage so the
-    # reply matcher can compare cleanly against In-Reply-To/References values.
     bracketed = email.utils.make_msgid(domain="bitcoding.local")
     msg["Message-ID"] = bracketed
     msg_id = bracketed.strip("<>").strip()
     if reply_to:
         msg["Reply-To"] = reply_to
 
-    # Plain text only — matches the cold-email style rule ("plain text, no HTML").
     msg.attach(MIMEText(body, "plain", "utf-8"))
+
+    if attachment:
+        path, filename = attachment
+        try:
+            data = path.read_bytes()
+        except Exception as e:
+            raise RuntimeError(f"Could not read attachment {path}: {e}") from e
+        part = MIMEBase("application", "pdf")
+        part.set_payload(data)
+        encoders.encode_base64(part)
+        safe_name = filename if filename.lower().endswith(".pdf") else f"{filename}.pdf"
+        part.add_header("Content-Disposition", f'attachment; filename="{safe_name}"')
+        msg.attach(part)
 
     ctx = ssl.create_default_context()
     with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, context=ctx, timeout=30) as s:

@@ -116,6 +116,47 @@ CREATE TABLE IF NOT EXISTS events (
   meta_json TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_events_at ON events(at);
+
+-- Blocklist: suppress ingest + send for matching companies / domains.
+-- Reason is free-text for audit ("upwork contract noise", "past bad fit").
+CREATE TABLE IF NOT EXISTS blocklist (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind       TEXT NOT NULL,              -- company | domain
+  value      TEXT NOT NULL,              -- lowercase normalized
+  reason     TEXT,
+  created_at TEXT NOT NULL,
+  UNIQUE(kind, value)
+);
+
+-- CV library: uploaded PDFs auto-picked by cv_cluster at send time.
+CREATE TABLE IF NOT EXISTS cvs (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  cluster     TEXT NOT NULL UNIQUE,       -- python_ai | fullstack | scraping | n8n | default
+  filename    TEXT NOT NULL,              -- original upload filename
+  stored_path TEXT NOT NULL,              -- absolute path to file on disk
+  size_bytes  INTEGER,
+  uploaded_at TEXT NOT NULL
+);
+
+-- Follow-ups: tracks which leads have been followed up and when.
+-- First follow-up fires 3 days after last_sent if no reply, second 7 days after first.
+CREATE TABLE IF NOT EXISTS followups (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  lead_id       INTEGER NOT NULL REFERENCES leads(id),
+  sequence      INTEGER NOT NULL,          -- 1 = first follow-up, 2 = second
+  message_id    TEXT,
+  sent_at       TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_followups_lead ON followups(lead_id);
+
+-- Autopilot state (tracked per-day for visibility).
+CREATE TABLE IF NOT EXISTS autopilot_runs (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  fired_at      TEXT NOT NULL,
+  fired_date    TEXT NOT NULL UNIQUE,
+  total_queued  INTEGER,
+  status        TEXT NOT NULL              -- started | skipped_quiet | skipped_quota | skipped_paused | skipped_no_drafts
+);
 """
 
 

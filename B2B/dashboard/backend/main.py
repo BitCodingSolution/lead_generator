@@ -67,8 +67,19 @@ app.include_router(sources_router)
 
 # ---- LinkedIn source (separate section — not part of /sources registry) ----
 from linkedin_api import router as linkedin_router  # noqa: E402
+from linkedin_extras import router as linkedin_extras_router, reset_orphans as _reset_orphans  # noqa: E402
 
 app.include_router(linkedin_router)
+app.include_router(linkedin_extras_router)
+
+
+@app.on_event("startup")
+def _linkedin_startup_cleanup():
+    """Any leads stuck mid-send before last shutdown — revert to Drafted."""
+    try:
+        _reset_orphans()
+    except Exception as e:
+        print(f"[linkedin] startup orphan reset failed: {e}")
 
 
 # ---- Source action endpoints (scrape / enrich / export-batch) ----

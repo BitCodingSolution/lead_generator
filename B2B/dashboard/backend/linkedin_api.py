@@ -28,6 +28,7 @@ from pydantic import BaseModel, Field
 from linkedin_db import connect, init
 from linkedin_claude import generate_draft as _claude_generate
 import linkedin_gmail as gmail
+import linkedin_extras as extras
 
 DAILY_CAP = 20
 WARNING_PAUSE_DAYS = 7
@@ -349,13 +350,25 @@ def _log_event(con, kind: str, lead_id: Optional[int] = None, meta: Optional[dic
 
 
 def _upsert_lead(con, p: IngestPost) -> tuple[int, str]:
-    """Insert or update by post_url. Returns (lead_id, action)."""
+    """Insert or update by post_url. Returns (lead_id, action).
+    Blocked by recyclebin dedup and company/domain blocklist on INSERT —
+    updates to existing active rows always pass through."""
     now = dt.datetime.now().isoformat(timespec="seconds")
     row = con.execute(
         "SELECT id, email, status FROM leads WHERE post_url = ?", (p.post_url,)
     ).fetchone()
 
     if row is None:
+        # Already archived? Don't re-ingest — would undo a deliberate archive.
+        in_bin = con.execute(
+            "SELECT id FROM recyclebin WHERE post_url = ? LIMIT 1", (p.post_url,)
+        ).fetchone()
+        if in_bin is not None:
+            return -1, "recyclebin_dup"
+        # Company/email-domain blocklist — skip ingest.
+        block = extras.is_blocked(p.company, p.email)
+        if block is not None:
+            return -1, f"blocked:{block['kind']}"
         cur = con.execute(
             """INSERT INTO leads (post_url, posted_by, company, role, tech_stack,
                rate, location, tags, post_text, email, phone,
@@ -402,16 +415,29 @@ def ingest(
     _require_ext_key(x_ext_key)
     inserted = 0
     updated = 0
+    dup_bin = 0
+    blocked = 0
     with connect() as con:
         for p in payload.leads:
             _, action = _upsert_lead(con, p)
             if action == "inserted":
                 inserted += 1
-            else:
+            elif action == "updated":
                 updated += 1
-        _log_event(con, "ingest", meta={"inserted": inserted, "updated": updated})
+            elif action == "recyclebin_dup":
+                dup_bin += 1
+            elif action.startswith("blocked:"):
+                blocked += 1
+        _log_event(con, "ingest", meta={
+            "inserted": inserted, "updated": updated,
+            "dup_bin": dup_bin, "blocked": blocked,
+        })
         con.commit()
-    return {"inserted": inserted, "updated": updated, "total": len(payload.leads)}
+    return {
+        "inserted": inserted, "updated": updated,
+        "dup_bin": dup_bin, "blocked": blocked,
+        "total": len(payload.leads),
+    }
 
 
 # ---------- account-warning pause ----------
@@ -799,13 +825,22 @@ def send_one(lead_id: int):
             )
         if lead["status"] == "Sent":
             raise HTTPException(400, "Already sent")
+        block = extras.is_blocked(lead["company"], lead["email"])
+        if block:
+            raise HTTPException(
+                400,
+                f"Blocked by {block['kind']} blocklist: {block['value']}",
+            )
         _check_safety_before_send(con)
+
+    attachment = extras.pick_cv_path(lead["cv_cluster"])
 
     try:
         result = gmail.send_email(
             to=lead["email"],
             subject=lead["gen_subject"],
             body=lead["gen_body"],
+            attachment=attachment,
         )
     except Exception as e:
         with connect() as con:
@@ -886,7 +921,8 @@ def _batch_worker(lead_ids: list[int], source: str) -> None:
                     break
 
                 lead = con.execute(
-                    "SELECT email, gen_subject, gen_body, jaydip_note, status "
+                    "SELECT email, gen_subject, gen_body, jaydip_note, status, "
+                    "       company, cv_cluster "
                     "FROM leads WHERE id = ?", (lead_id,),
                 ).fetchone()
                 if lead is None or lead["status"] == "Sent" or (
@@ -894,15 +930,21 @@ def _batch_worker(lead_ids: list[int], source: str) -> None:
                 ).strip():
                     _batch_state["skipped"] += 1
                     continue
+                if extras.is_blocked(lead["company"], lead["email"]):
+                    _batch_state["skipped"] += 1
+                    continue
 
             _batch_state["current_lead_id"] = lead_id
             _batch_state["current_email"] = lead["email"]
+
+            attachment = extras.pick_cv_path(lead["cv_cluster"])
 
             try:
                 result = gmail.send_email(
                     to=lead["email"],
                     subject=lead["gen_subject"],
                     body=lead["gen_body"],
+                    attachment=attachment,
                 )
                 with connect() as con:
                     _record_send(con, lead_id, result.message_id, result.sent_at)
@@ -1028,11 +1070,36 @@ def _autopilot_tick() -> None:
         return
 
     try:
-        send_batch(BatchSendIn(count=DAILY_CAP, source="autopilot"))
+        resp = send_batch(BatchSendIn(count=DAILY_CAP, source="autopilot"))
         _autopilot_state["last_fired_date"] = today
-    except HTTPException as e:
-        # Dampen log spam — only record truly new error conditions.
         with connect() as con:
+            con.execute(
+                "INSERT OR REPLACE INTO autopilot_runs "
+                "(fired_at, fired_date, total_queued, status) VALUES (?, ?, ?, ?)",
+                (
+                    dt.datetime.now().isoformat(timespec="seconds"),
+                    today,
+                    int(resp.get("total", 0)),
+                    "started",
+                ),
+            )
+            con.commit()
+    except HTTPException as e:
+        status_map = {
+            429: "skipped_quota",
+            423: "skipped_quiet_or_paused",
+            400: "skipped_no_drafts",
+        }
+        status = status_map.get(e.status_code, "skipped_other")
+        with connect() as con:
+            con.execute(
+                "INSERT OR REPLACE INTO autopilot_runs "
+                "(fired_at, fired_date, total_queued, status) VALUES (?, ?, ?, ?)",
+                (
+                    dt.datetime.now().isoformat(timespec="seconds"),
+                    today, 0, status,
+                ),
+            )
             _log_event(con, "autopilot_skip",
                        meta={"status": e.status_code, "detail": str(e.detail)[:200]})
             con.commit()

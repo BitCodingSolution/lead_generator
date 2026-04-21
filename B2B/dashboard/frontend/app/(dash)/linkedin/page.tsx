@@ -3,6 +3,7 @@ import { LinkedInKpiRow } from "@/components/linkedin/linkedin-kpi-row"
 import { LinkedInSafetyCard } from "@/components/linkedin/linkedin-safety-card"
 import { LinkedInGmailConnect } from "@/components/linkedin/linkedin-gmail-connect"
 import { LinkedInBatchSend } from "@/components/linkedin/linkedin-batch-send"
+import { LinkedInAutopilotStatus } from "@/components/linkedin/linkedin-autopilot-status"
 
 export default function LinkedInOverviewPage() {
   return (
@@ -20,6 +21,8 @@ export default function LinkedInOverviewPage() {
         <LinkedInSafetyCard />
         <LinkedInGmailConnect />
       </div>
+
+      <LinkedInAutopilotStatus />
     </div>
   )
 }
