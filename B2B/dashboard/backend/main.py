@@ -562,37 +562,50 @@ def _batch_status(path: Path) -> dict:
 
 @app.get("/api/campaigns/batches")
 def all_campaign_batches():
-    """Cross-source aggregator: every batch file in `Grab Leads/mailer/batches/`
-    tagged with its source_id (parsed from filename `YYYY-MM-DD_<source>_<n>.xlsx`).
-    Powers the central Campaigns tab."""
+    """Cross-source aggregator: lists every batch file from every registered
+    source. Powers the central Campaigns tab."""
     from sources_api import _SOURCES
     known = set(_SOURCES.keys())
-    d = _grab_batches_dir()
     out = []
-    for f in sorted(d.glob("*.xlsx"), key=lambda p: p.stat().st_mtime, reverse=True):
-        # Parse source id: filename like "2026-04-20_ycombinator_3.xlsx"
+
+    # --- Grab-source batches: grab_leads/mailer/batches/<date>_<source>_<n>.xlsx ---
+    d = _grab_batches_dir()
+    for f in d.glob("*.xlsx"):
         stem = f.stem
         parts = stem.split("_")
         source_id = None
         if len(parts) >= 3:
-            # Try longest known-source match (supports underscores in source ids)
             for sid in known:
                 prefix = f"{parts[0]}_{sid}_"
                 if stem.startswith(prefix):
                     source_id = sid
                     break
         if source_id is None:
-            continue  # skip orphan/legacy files not tied to a registered source
+            continue
         stat = f.stat()
-        status = _batch_status(f)
         out.append({
-            "name": f.name,
-            "path": str(f),
-            "source": source_id,
+            "name": f.name, "path": str(f), "source": source_id,
             "size_kb": round(stat.st_size / 1024),
             "created_at": dt.datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"),
-            **status,
+            **_batch_status(f),
         })
+
+    # --- Marcel daily batches: Database/Marcel Data/01_Daily_Batches/<date>_<industry>.xlsx ---
+    # Marcel has a different pipeline (DB-picked per-run, not re-runnable per
+    # file) — tag them source="marcel" so the UI hides per-batch action
+    # buttons but still surfaces them as history.
+    marcel_dir = BASE / "Database" / "Marcel Data" / "01_Daily_Batches"
+    if marcel_dir.exists():
+        for f in marcel_dir.glob("*.xlsx"):
+            stat = f.stat()
+            out.append({
+                "name": f.name, "path": str(f), "source": "marcel",
+                "size_kb": round(stat.st_size / 1024),
+                "created_at": dt.datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"),
+                **_batch_status(f),
+            })
+
+    out.sort(key=lambda r: r.get("created_at", ""), reverse=True)
     return {"batches": out, "count": len(out)}
 
 

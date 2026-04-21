@@ -112,11 +112,20 @@ export function BatchesPanel({
     CampaignBatchesResponse | CrossResponse
   >(url, swrFetcher, { refreshInterval: 5000 })
 
-  const batches = (data?.batches || []).filter(
+  // Hide fully-sent batches by default — they're historic clutter. Keep the
+  // summary cards counting everything, but collapse archived rows here.
+  const [showSent, setShowSent] = React.useState(false)
+
+  const allMatchingSource = (data?.batches || []).filter(
     (b) => !sourceFilter || b.source === sourceFilter,
   )
-  if (isLoading && batches.length === 0) return null
-  if (batches.length === 0) {
+  const sentCount = allMatchingSource.filter((b) => b.state === "sent").length
+  const batches = showSent
+    ? allMatchingSource
+    : allMatchingSource.filter((b) => b.state !== "sent")
+
+  if (isLoading && allMatchingSource.length === 0) return null
+  if (allMatchingSource.length === 0) {
     return (
       <div className="rounded-xl border border-dashed border-zinc-800/80 bg-zinc-900/20 px-4 py-4 text-xs text-zinc-500">
         No campaign batches yet.{" "}
@@ -129,17 +138,41 @@ export function BatchesPanel({
 
   return (
     <div className="rounded-xl border border-zinc-800/80 bg-[#18181b]">
-      <div className="px-5 py-3 border-b border-zinc-800/70 flex items-center justify-between">
+      <div className="px-5 py-3 border-b border-zinc-800/70 flex items-center justify-between gap-3 flex-wrap">
         <div className="text-sm text-zinc-200 font-medium tracking-tight">
-          {scope.kind === "all" ? "All Campaign Batches" : "Campaign Batches"}{" "}
+          {scope.kind === "all" ? "Active Batches" : "Campaign Batches"}{" "}
           <span className="text-zinc-500 font-normal">· {batches.length}</span>
         </div>
-        <div className="text-[11px] text-zinc-500">
-          {scope.kind === "all"
-            ? "Cross-source · auto-updating"
-            : "Exported from this source · auto-updating"}
+        <div className="flex items-center gap-3">
+          {sentCount > 0 && (
+            <button
+              onClick={() => setShowSent((v) => !v)}
+              className="text-[11px] text-zinc-400 hover:text-zinc-200 underline-offset-2 hover:underline"
+            >
+              {showSent
+                ? `Hide sent (${sentCount})`
+                : `Show sent archive (${sentCount})`}
+            </button>
+          )}
+          <div className="text-[11px] text-zinc-500">
+            {scope.kind === "all"
+              ? "Cross-source · auto-updating"
+              : "Exported from this source · auto-updating"}
+          </div>
         </div>
       </div>
+      {!showSent && batches.length === 0 && sentCount > 0 && (
+        <div className="px-5 py-4 text-xs text-zinc-500">
+          All batches are sent. Click{" "}
+          <button
+            onClick={() => setShowSent(true)}
+            className="text-zinc-300 underline-offset-2 hover:underline"
+          >
+            Show sent archive
+          </button>{" "}
+          to review history.
+        </div>
+      )}
       <div className="divide-y divide-zinc-800/60">
         {batches.map((b) => {
           const rowSourceId =
@@ -433,7 +466,9 @@ function BatchRow({
         </div>
 
         <div className="flex items-center gap-1.5">
-          {batch.in_outlook < batch.total && batch.total > 0 && (
+          {/* Marcel has its own DB-picked pipeline — per-file actions don't
+              apply; we only allow delete for history cleanup. */}
+          {sourceId !== "marcel" && batch.in_outlook < batch.total && batch.total > 0 && (
             <Button
               size="sm"
               disabled={!!busy}
@@ -450,7 +485,7 @@ function BatchRow({
                     : "Run Pipeline"}
             </Button>
           )}
-          {batch.drafted < batch.total && (
+          {sourceId !== "marcel" && batch.drafted < batch.total && (
             <Button
               size="sm"
               variant="ghost"
@@ -470,7 +505,8 @@ function BatchRow({
               drafts only
             </Button>
           )}
-          {batch.in_outlook >= batch.total &&
+          {sourceId !== "marcel" &&
+            batch.in_outlook >= batch.total &&
             batch.sent < batch.total &&
             batch.total > 0 && (
               <Button
@@ -500,16 +536,18 @@ function BatchRow({
                   : `Send ${batch.in_outlook - batch.sent}`}
               </Button>
             )}
-          <Button
-            size="sm"
-            variant="ghost"
-            disabled={!!busy}
-            onClick={onDelete}
-            title="Delete batch"
-            className="text-zinc-500 hover:text-red-400"
-          >
-            <XIcon className="size-3.5" />
-          </Button>
+          {sourceId !== "marcel" && (
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={!!busy}
+              onClick={onDelete}
+              title="Delete batch"
+              className="text-zinc-500 hover:text-red-400"
+            >
+              <XIcon className="size-3.5" />
+            </Button>
+          )}
         </div>
       </div>
       {batch.total > 0 && (
