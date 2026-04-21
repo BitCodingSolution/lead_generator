@@ -1,54 +1,119 @@
-// Shared config + storage helpers for the BitCoding LinkedIn extension.
-// Phase 1: dashboard URL + API-key plumbing only. Scan/send logic arrives
-// in Phase 2.
+// Safety configuration — tuned to stay well below LinkedIn's automation triggers.
+// Two modes:
+//   - "max"    → MAXIMUM SAFETY: extension is read-only, user does all actions manually
+//   - "normal" → existing assisted flow (navigate + scroll + click)
+//
+// Default is "max" — explicitly opt into "normal" in Settings.
 
-const DASHBOARD_BASE = "http://localhost:8900";
-const API = {
-  overview: `${DASHBOARD_BASE}/api/linkedin/overview`,
-  safety: `${DASHBOARD_BASE}/api/linkedin/safety`,
-  ingest: `${DASHBOARD_BASE}/api/linkedin/ingest`,
-  warning: `${DASHBOARD_BASE}/api/linkedin/account-warning`,
+const SAFETY_MODES = {
+  // Read-only assistant — user drives, extension only reads
+  max: {
+    // Only applies to REPLY generation (which reads LinkedIn DOM).
+    // Post extraction has its own lightweight counter for cost tracking only
+    // and is NOT rate-limited, because extract never touches LinkedIn.
+    DAILY_REPLY_CAP: 20,
+    MIN_COOLDOWN_MS: 3 * 60 * 1000, // 3 min
+    // Failure backoff — strict in Max mode because consecutive failures can
+    // signal LinkedIn is fighting back (challenge page, rate limit). Better
+    // to step away than keep poking the account.
+    MAX_CONSECUTIVE_FAILURES: 3,
+    FAILURE_COOLDOWN_MS: 10 * 60 * 1000, // 10 min
+    AUTO_NAVIGATE: false, // don't change the tab URL
+    AUTO_SCROLL: false, // don't scroll programmatically
+    AUTO_EXPAND: false, // don't click "…more"
+    AUTO_PASTE: false, // don't touch the reply box — user copies manually
+    LABEL: "🛡 Maximum Safety",
+    DESCRIPTION:
+      "Read-only. You drive, extension only reads visible content and generates AI replies.",
+  },
+
+  // Current assisted flow
+  normal: {
+    DAILY_REPLY_CAP: 30,
+    MIN_COOLDOWN_MS: 90 * 1000,
+    // Failure backoff — looser in Normal mode because most failures in
+    // practice are DOM parse issues or Claude hiccups, not account-safety
+    // signals. User opted into Normal explicitly; minimise friction.
+    MAX_CONSECUTIVE_FAILURES: 5,
+    FAILURE_COOLDOWN_MS: 2 * 60 * 1000, // 2 min
+    AUTO_NAVIGATE: true,
+    AUTO_SCROLL: true,
+    AUTO_EXPAND: true,
+    AUTO_PASTE: true,
+    LABEL: "⚡ Normal",
+    DESCRIPTION:
+      "Assisted. Extension navigates, scrolls, expands '…more', and pastes replies.",
+  },
 };
 
-const STORAGE_KEYS = {
-  apiKey: "bc_linkedin_api_key",
-  lastStatus: "bc_linkedin_last_status",
+// Constants shared by both modes
+const SAFETY_COMMON = {
+
+  // Warning pause — if LinkedIn shows an account-warning banner, stop for 7 days
+  WARNING_PAUSE_MS: 7 * 24 * 60 * 60 * 1000,
+
+  // Quiet hours (local time) — no searches at night
+  QUIET_START_HOUR: 23, // 11 PM
+  QUIET_END_HOUR: 7, // 7 AM
+
+  // Scroll / expand pacing (only applies in Normal mode)
+  SCROLL_COUNT: 3,
+  SCROLL_STEP_MIN: 600,
+  SCROLL_STEP_MAX: 1100,
+  SCROLL_DELAY_MIN_MS: 1800,
+  SCROLL_DELAY_MAX_MS: 3200,
+  EXPAND_CLICK_DELAY_MIN_MS: 150,
+  EXPAND_CLICK_DELAY_MAX_MS: 400,
+  EXPAND_SETTLE_MIN_MS: 1200,
+  EXPAND_SETTLE_MAX_MS: 2200,
+  POST_LOAD_WAIT_MIN_MS: 2500,
+  POST_LOAD_WAIT_MAX_MS: 4500,
+  TAB_LOAD_TIMEOUT_MS: 35 * 1000,
 };
 
-async function getApiKey() {
-  const { [STORAGE_KEYS.apiKey]: k } = await chrome.storage.local.get(
-    STORAGE_KEYS.apiKey,
-  );
-  return k || "";
+function SAFETY_FOR(mode) {
+  const m = SAFETY_MODES[mode] || SAFETY_MODES.max;
+  return { ...SAFETY_COMMON, ...m, mode: SAFETY_MODES[mode] ? mode : "max" };
 }
 
-async function setApiKey(key) {
-  await chrome.storage.local.set({ [STORAGE_KEYS.apiKey]: key });
-}
+// Account-warning detection — these phrases indicate LinkedIn flagged the account
+const WARNING_PHRASES = [
+  "we've restricted your account",
+  "your account has been restricted",
+  "account is temporarily restricted",
+  "temporarily limited",
+  "we noticed some unusual activity",
+  "we've detected unusual activity",
+  "we detected automated activity",
+  "verify your identity",
+  "please confirm you're not a robot",
+  "we restricted your access",
+  "your linkedin account has been restricted",
+];
 
-async function apiFetch(path, init = {}) {
-  const key = await getApiKey();
-  const res = await fetch(path, {
-    ...init,
-    headers: {
-      Accept: "application/json",
-      "Content-Type": "application/json",
-      "X-Ext-Key": key,
-      ...(init.headers || {}),
-    },
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`${res.status} ${res.statusText}${text ? ` — ${text}` : ""}`);
-  }
-  return res.json();
-}
+// Challenge pages (login/checkpoint/authwall)
+const CHALLENGE_SIGNATURES = {
+  urlFragments: [
+    "checkpoint",
+    "authwall",
+    "challenge",
+    "uas/login",
+    "/login",
+    "unavailable",
+  ],
+  titleFragments: [
+    "security verification",
+    "sign in",
+    "unusual activity",
+    "let's do a quick security check",
+    "linkedin: log in",
+  ],
+};
 
 if (typeof self !== "undefined") {
-  self.DASHBOARD_BASE = DASHBOARD_BASE;
-  self.API = API;
-  self.STORAGE_KEYS = STORAGE_KEYS;
-  self.getApiKey = getApiKey;
-  self.setApiKey = setApiKey;
-  self.apiFetch = apiFetch;
+  self.SAFETY_MODES = SAFETY_MODES;
+  self.SAFETY_COMMON = SAFETY_COMMON;
+  self.SAFETY_FOR = SAFETY_FOR;
+  self.WARNING_PHRASES = WARNING_PHRASES;
+  self.CHALLENGE_SIGNATURES = CHALLENGE_SIGNATURES;
 }
