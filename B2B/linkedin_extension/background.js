@@ -1212,8 +1212,19 @@ async function handleSaveToSheet(payload, _force) {
   // Fields Apps Script accepted that the dashboard doesn't (email_mode,
   // email_subject, email_body, should_skip, notes) are dropped — drafts are
   // generated server-side on the dashboard now.
+  let postUrl = String(payload.post_url || "").trim();
+  // Whole-page fallback scans don't have a per-post URL (LinkedIn's DOM
+  // scrubbed the URN). Generate a stable synthetic URL using email/phone so
+  // the dashboard can dedup and the row still gets saved.
+  if (!postUrl) {
+    const seed = (payload.email || payload.phone || (payload.post_text || "").slice(0, 120)).trim();
+    if (!seed) {
+      throw new Error("No post_url, email, phone, or text — cannot save an empty lead.");
+    }
+    postUrl = `https://linkedin.fallback/${encodeURIComponent(seed)}`;
+  }
   const lead = {
-    post_url:   String(payload.post_url || "").trim(),
+    post_url:   postUrl,
     posted_by:  payload.posted_by  || null,
     company:    payload.company    || null,
     role:       payload.role       || null,
@@ -1225,9 +1236,6 @@ async function handleSaveToSheet(payload, _force) {
     email:      payload.email      || null,
     phone:      payload.phone      || null,
   };
-  if (!lead.post_url) {
-    throw new Error("Missing post_url — cannot save a lead without its LinkedIn URL.");
-  }
 
   let res;
   try {

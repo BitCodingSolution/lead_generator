@@ -1766,11 +1766,22 @@ async function scanSaveAll() {
         scanSavedKeys.add(scanLeadKey(lead));
       } else {
         failed++;
-        if (btn) { btn.disabled = false; }
+        const errText = (resp && resp.error) || "no response";
+        console.warn("[Save-all] lead failed:", errText, { lead, payload });
+        if (btn) {
+          btn.disabled = false;
+          btn.textContent = "⚠ Failed";
+          btn.title = String(errText).slice(0, 200);
+        }
       }
     } catch (err) {
       failed++;
-      if (btn) { btn.disabled = false; }
+      console.warn("[Save-all] exception:", err.message, { lead, payload });
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = "⚠ Error";
+        btn.title = String(err.message || "").slice(0, 200);
+      }
     }
 
     const processed = saved + skippedDupe + failed;
