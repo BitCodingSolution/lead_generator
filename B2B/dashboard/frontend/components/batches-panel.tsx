@@ -112,17 +112,26 @@ export function BatchesPanel({
     CampaignBatchesResponse | CrossResponse
   >(url, swrFetcher, { refreshInterval: 5000 })
 
-  // Hide fully-sent batches by default — they're historic clutter. Keep the
-  // summary cards counting everything, but collapse archived rows here.
-  const [showSent, setShowSent] = React.useState(false)
+  // "Archive" = fully sent OR stale (>7 days old). Hidden by default so the
+  // list shows only things worth acting on today. Summary cards stay lifetime.
+  const [showArchive, setShowArchive] = React.useState(false)
+  const STALE_DAYS = 7
+
+  const isArchived = React.useCallback((b: CampaignBatch) => {
+    if (b.state === "sent") return true
+    const created = b.created_at ? Date.parse(b.created_at) : 0
+    if (!created) return false
+    const ageDays = (Date.now() - created) / 86400000
+    return ageDays > STALE_DAYS
+  }, [])
 
   const allMatchingSource = (data?.batches || []).filter(
     (b) => !sourceFilter || b.source === sourceFilter,
   )
-  const sentCount = allMatchingSource.filter((b) => b.state === "sent").length
-  const batches = showSent
+  const archivedCount = allMatchingSource.filter(isArchived).length
+  const batches = showArchive
     ? allMatchingSource
-    : allMatchingSource.filter((b) => b.state !== "sent")
+    : allMatchingSource.filter((b) => !isArchived(b))
 
   if (isLoading && allMatchingSource.length === 0) return null
   if (allMatchingSource.length === 0) {
@@ -144,14 +153,15 @@ export function BatchesPanel({
           <span className="text-zinc-500 font-normal">· {batches.length}</span>
         </div>
         <div className="flex items-center gap-3">
-          {sentCount > 0 && (
+          {archivedCount > 0 && (
             <button
-              onClick={() => setShowSent((v) => !v)}
+              onClick={() => setShowArchive((v) => !v)}
               className="text-[11px] text-zinc-400 hover:text-zinc-200 underline-offset-2 hover:underline"
+              title={`Archive = sent or older than ${STALE_DAYS} days`}
             >
-              {showSent
-                ? `Hide sent (${sentCount})`
-                : `Show sent archive (${sentCount})`}
+              {showArchive
+                ? `Hide archive (${archivedCount})`
+                : `Show archive (${archivedCount})`}
             </button>
           )}
           <div className="text-[11px] text-zinc-500">
@@ -161,14 +171,14 @@ export function BatchesPanel({
           </div>
         </div>
       </div>
-      {!showSent && batches.length === 0 && sentCount > 0 && (
+      {!showArchive && batches.length === 0 && archivedCount > 0 && (
         <div className="px-5 py-4 text-xs text-zinc-500">
-          All batches are sent. Click{" "}
+          No active batches. Click{" "}
           <button
-            onClick={() => setShowSent(true)}
+            onClick={() => setShowArchive(true)}
             className="text-zinc-300 underline-offset-2 hover:underline"
           >
-            Show sent archive
+            Show archive
           </button>{" "}
           to review history.
         </div>
@@ -562,11 +572,14 @@ function BatchRow({
 }
 
 function MiniBar({ label, percent }: { label: string; percent: number }) {
+  // Raw `percent` may be fractional (e.g. 66.666…) from smoothed counts —
+  // round for the text label but keep precision for the bar width below.
+  const shown = Math.round(percent)
   return (
     <div>
       <div className="flex items-center justify-between">
         <span>{label}</span>
-        <span className="tnum">{percent}%</span>
+        <span className="tnum">{shown}%</span>
       </div>
       <div className="h-1 rounded bg-zinc-900 overflow-hidden">
         <div
