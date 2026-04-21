@@ -131,3 +131,70 @@ export type Job = {
 }
 
 export type Health = { ok: boolean; db: boolean; time: string }
+
+// ---------- LinkedIn source ----------
+
+export type LinkedInLead = {
+  id: number
+  post_url: string
+  posted_by: string | null
+  company: string | null
+  role: string | null
+  tech_stack: string | null
+  location: string | null
+  email: string | null
+  status:
+    | "New"
+    | "Drafted"
+    | "Queued"
+    | "Sending"
+    | "Sent"
+    | "Replied"
+    | "Bounced"
+    | "Skipped"
+  gen_subject: string | null
+  cv_cluster: string | null
+  first_seen_at: string
+  last_seen_at: string
+  sent_at: string | null
+  replied_at: string | null
+  needs_attention: 0 | 1
+}
+
+export type LinkedInLeadsResponse = {
+  rows: LinkedInLead[]
+  total: number
+}
+
+export type LinkedInOverview = {
+  total: number
+  new: number
+  drafted: number
+  queued: number
+  sent_today: number
+  replied: number
+  bounced: number
+  quota_used: number
+  quota_cap: number
+  gmail_connected: boolean
+  autopilot_enabled: boolean
+  safety_mode: "max" | "normal"
+  warning_paused_until: string | null
+}
+
+export type LinkedInSafety = {
+  daily_sent_count: number
+  daily_sent_date: string | null
+  last_send_at: string | null
+  consecutive_failures: number
+  warning_paused_until: string | null
+  autopilot_enabled: boolean
+  autopilot_hour: number
+  safety_mode: "max" | "normal"
+}
+
+export type LinkedInGmailStatus = {
+  connected: boolean
+  email: string | null
+  expires_at: string | null
+}

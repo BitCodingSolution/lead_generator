@@ -9,6 +9,7 @@ import {
   BarChart3,
   CornerDownRight,
   Database,
+  Briefcase,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 
@@ -21,6 +22,7 @@ type NavItem = {
 const NAV: NavItem[] = [
   { href: "/", label: "Overview", icon: LayoutDashboard },
   { href: "/sources", label: "Sources", icon: Database },
+  { href: "/linkedin", label: "LinkedIn", icon: Briefcase },
   { href: "/campaigns", label: "Campaigns", icon: Rocket },
   { href: "/replies", label: "Replies", icon: MessageSquareReply },
   { href: "/analytics", label: "Analytics", icon: BarChart3 },

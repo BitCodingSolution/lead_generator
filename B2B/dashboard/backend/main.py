@@ -65,6 +65,11 @@ register_source(Source(
 
 app.include_router(sources_router)
 
+# ---- LinkedIn source (separate section — not part of /sources registry) ----
+from linkedin_api import router as linkedin_router  # noqa: E402
+
+app.include_router(linkedin_router)
+
 
 # ---- Source action endpoints (scrape / enrich / export-batch) ----
 class SourceActionReq(BaseModel):
@@ -1182,6 +1187,30 @@ def _scheduler_loop():
 @app.on_event("startup")
 def _start_scheduler():
     t = threading.Thread(target=_scheduler_loop, daemon=True)
+    t.start()
+
+
+def _linkedin_poll_loop():
+    """Every 60s, run the autopilot tick (cheap check). Every 5th iteration
+    (~5 min), poll Gmail INBOX for replies/bounces if Gmail is connected."""
+    import time as _time
+    from linkedin_api import _poll_and_store, _autopilot_tick
+    from linkedin_gmail import get_credentials as _gmail_creds
+    tick = 0
+    while True:
+        try:
+            _autopilot_tick()
+            if tick % 5 == 0 and _gmail_creds() is not None:
+                _poll_and_store()
+        except Exception as e:
+            print(f"[linkedin-poll] {e}")
+        tick += 1
+        _time.sleep(60)
+
+
+@app.on_event("startup")
+def _start_linkedin_poll():
+    t = threading.Thread(target=_linkedin_poll_loop, daemon=True)
     t.start()
 
 

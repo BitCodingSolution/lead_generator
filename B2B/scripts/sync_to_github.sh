@@ -47,6 +47,7 @@ shutil.copytree(
         '*.db', '*.db-journal', '*.db-wal', '*.db-shm',
         'schedules.json', 'schedules.json.corrupt',
         '*.log', '*.xlsx.bak', '.venv', 'venv',
+        '.fernet.key', '*.secret', '.env', '.env.*',
     ),
 )
 print('[mirror] copy done')

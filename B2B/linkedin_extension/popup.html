@@ -1,0 +1,51 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>BitCoding LinkedIn</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header class="hdr">
+      <div class="logo">BC</div>
+      <div>
+        <div class="title">BitCoding</div>
+        <div class="sub">LinkedIn Outreach</div>
+      </div>
+    </header>
+
+    <section class="card">
+      <div class="label">Dashboard</div>
+      <div id="dashboard-url" class="mono">http://localhost:8900</div>
+      <div id="conn-status" class="status muted">Checking…</div>
+    </section>
+
+    <section class="card">
+      <div class="label">API key</div>
+      <input id="api-key" type="password" placeholder="Paste key from dashboard Settings" />
+      <div class="row">
+        <button id="save-key">Save</button>
+        <button id="test-key" class="secondary">Test</button>
+      </div>
+      <div id="key-msg" class="status muted"></div>
+    </section>
+
+    <section class="card">
+      <div class="label">Scan current tab</div>
+      <button id="scan" class="full">Scan search → Posts</button>
+      <div id="scan-msg" class="status muted">
+        Open a LinkedIn <span class="mono">search/results/content</span> page, then click Scan.
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="label">Stats</div>
+      <div id="stats" class="stats muted">—</div>
+    </section>
+
+    <footer class="foot muted">Phase 2 — scan + ingest live. Send lands in Phase 4.</footer>
+
+    <script src="config.js"></script>
+    <script src="popup.js"></script>
+  </body>
+</html>
