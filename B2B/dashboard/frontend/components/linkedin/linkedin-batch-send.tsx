@@ -198,20 +198,20 @@ function IdlePanel({
   const etaSecs = count * AVG_SECS_PER_SEND
 
   return (
-    <div className="space-y-3">
-      {/* budget row: drafted + quota left */}
-      <div className="grid grid-cols-2 gap-2">
-        <BudgetCell
-          label="Drafts ready"
+    <div className="space-y-2.5">
+      {/* compact metric strip — replaces the big budget cards */}
+      <div className="flex items-center gap-3 text-[11px] tnum">
+        <MetricChip
+          icon={<Mail className="size-3" />}
+          label="drafts"
           value={drafted}
           tone={drafted > 0 ? "ok" : "dim"}
-          hint={drafted === 0 ? "none yet" : undefined}
         />
-        <BudgetCell
-          label="Quota left today"
+        <MetricChip
+          icon={<Zap className="size-3" />}
+          label="quota left"
           value={quotaLeft}
           tone={quotaLeft > 0 ? "ok" : "warn"}
-          hint={quotaLeft === 0 ? "cap reached" : undefined}
         />
       </div>
 
@@ -228,10 +228,10 @@ function IdlePanel({
           <span>{blocked.msg}</span>
         </div>
       ) : (
-        <>
-          {/* count picker */}
+        <div className="rounded-md border border-zinc-800 bg-zinc-900/40 p-2.5 space-y-2">
+          {/* primary action row: count + presets + Start */}
           <div className="flex items-center gap-2">
-            <label className="text-[11px] text-zinc-500">Send</label>
+            <label className="text-[11px] text-zinc-500 shrink-0">Send</label>
             <input
               type="number"
               min={1}
@@ -242,12 +242,12 @@ function IdlePanel({
                   Math.max(1, Math.min(safeMax, parseInt(e.target.value, 10) || 1)),
                 )
               }
-              className="w-16 rounded border border-zinc-800 bg-zinc-900/60 px-1.5 py-0.5 text-sm text-zinc-100 tnum focus:outline-none focus:border-[hsl(250_80%_62%)]"
+              className="w-14 rounded border border-zinc-800 bg-zinc-950/60 px-1.5 py-0.5 text-sm text-zinc-100 tnum focus:outline-none focus:border-[hsl(250_80%_62%)]"
             />
-            <span className="text-[11px] text-zinc-500">
-              of {safeMax} available
+            <span className="text-[11px] text-zinc-500 shrink-0">
+              of {safeMax}
             </span>
-            <div className="ml-auto flex items-center gap-1">
+            <div className="flex items-center gap-1">
               {presets.map((p) => (
                 <button
                   key={p.label}
@@ -256,22 +256,12 @@ function IdlePanel({
                     "rounded border px-1.5 py-0.5 text-[11px] transition",
                     count === p.value
                       ? "border-[hsl(250_80%_62%)] bg-[hsl(250_80%_62%/0.15)] text-violet-200"
-                      : "border-zinc-800 bg-zinc-900/40 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200",
+                      : "border-zinc-800 bg-zinc-950/40 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200",
                   )}
                 >
                   {p.label}
                 </button>
               ))}
-            </div>
-          </div>
-
-          {/* ETA preview + Start */}
-          <div className="flex items-center gap-2">
-            <div className="flex items-center gap-1.5 text-[11px] text-zinc-500">
-              <Zap className="size-3" />
-              <span>
-                ~{fmtDuration(etaSecs)} · rotated across active Gmail accounts
-              </span>
             </div>
             <button
               onClick={onStart}
@@ -286,7 +276,10 @@ function IdlePanel({
               Start batch
             </button>
           </div>
-        </>
+          <div className="text-[11px] text-zinc-500">
+            ~{fmtDuration(etaSecs)} · rotated across active Gmail accounts
+          </div>
+        </div>
       )}
 
       {/* last run compact pill row */}
@@ -373,44 +366,41 @@ function RunningPanel({
   )
 }
 
-function BudgetCell({
-  label, value, tone, hint,
+function MetricChip({
+  icon, label, value, tone,
 }: {
+  icon: React.ReactNode
   label: string
   value: number
   tone: "ok" | "warn" | "dim"
-  hint?: string
 }) {
   return (
-    <div
-      className={cn(
-        "rounded-md border px-2.5 py-1.5",
-        tone === "warn"
-          ? "border-amber-500/30 bg-amber-500/5"
-          : "border-zinc-800 bg-zinc-900/40",
-      )}
-    >
-      <div className="text-[10px] uppercase tracking-wide text-zinc-500">
-        {label}
-      </div>
-      <div className="flex items-baseline gap-1.5">
-        <span
-          className={cn(
-            "text-lg font-semibold tnum",
-            tone === "ok"
-              ? "text-zinc-100"
-              : tone === "warn"
-                ? "text-amber-200"
-                : "text-zinc-500",
-          )}
-        >
-          {value}
-        </span>
-        {hint && (
-          <span className="text-[10px] text-zinc-500">{hint}</span>
+    <span className="inline-flex items-center gap-1.5 text-zinc-400">
+      <span
+        className={cn(
+          tone === "warn"
+            ? "text-amber-300"
+            : tone === "ok"
+              ? "text-zinc-500"
+              : "text-zinc-600",
         )}
-      </div>
-    </div>
+      >
+        {icon}
+      </span>
+      <span
+        className={cn(
+          "font-semibold tnum",
+          tone === "warn"
+            ? "text-amber-200"
+            : tone === "ok"
+              ? "text-zinc-100"
+              : "text-zinc-500",
+        )}
+      >
+        {value}
+      </span>
+      <span className="text-zinc-500">{label}</span>
+    </span>
   )
 }
 
