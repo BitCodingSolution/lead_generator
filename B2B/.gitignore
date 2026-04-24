@@ -1,0 +1,62 @@
+# --- Data / PII (never commit) ---
+Database/
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+*.db.bak
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+env/
+
+# --- Node / Next.js ---
+node_modules/
+.next/
+out/
+build/
+dist/
+.turbo/
+
+# --- Env / secrets ---
+.env
+.env.local
+.env.*.local
+.api_key
+api_key.txt
+
+# --- Editor / OS ---
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# --- Logs / temp ---
+*.log
+bridge.log
+npm-debug.log*
+
+# --- Misc project ---
+AppsScript/
+*.xlsx.bak
+
+# --- Claude Code local workspace ---
+.claude/
+
+# --- Backend runtime state ---
+dashboard/backend/schedules.json
+dashboard/backend/schedules.json.corrupt
+
+# --- Grab Leads runtime output (data is not source) ---
+grab_leads/logs/
+grab_leads/sources/*/raw/
+grab_leads/sources/*/data.db
+grab_leads/mailer/batches/
+grab_leads/.claude/

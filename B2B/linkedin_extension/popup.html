@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Pradip AI — Lead Tracker</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h2>Pradip AI — Lead Tracker</h2>
+      <div class="header-right">
+        <button id="themeToggleBtn" class="icon-btn" title="Toggle dark mode">☀</button>
+        <span class="version">v0.8.2</span>
+      </div>
+    </header>
+
+    <nav class="tabs">
+      <button class="tab-btn active" data-tab="bulk">🎯 Bulk</button>
+      <button class="tab-btn" data-tab="reply">💬 Reply</button>
+      <button class="tab-btn" data-tab="posts">✍ Posts</button>
+      <button class="tab-btn" data-tab="settings">⚙ Settings</button>
+    </nav>
+
+    <!-- ============ BULK SEARCH TAB ============ -->
+    <section class="tab-pane active" id="tab-bulk">
+      <div class="info-card">
+        <p>
+          🎯 <strong>Bulk Search URL builder + Live Scan.</strong> Generates
+          <em>query × location</em> LinkedIn search URLs. Click
+          <strong>Open next</strong> to browse one at a time, then
+          <strong>Scan this page</strong> to auto-grab leads + emails into
+          your sheet.
+        </p>
+      </div>
+
+      <div id="bulkBridgeHealth" class="bridge-health bh-unknown">
+        <span class="bh-dot"></span>
+        <span class="bh-text">Checking bridge…</span>
+      </div>
+
+      <div class="bulk-stats">
+        <span class="bulk-pill" id="bulkProgressPill">0 / 0</span>
+        <span class="bulk-hint">cursor position (next to open / total URLs)</span>
+      </div>
+
+      <!-- Live scan of the currently open LinkedIn search-results tab -->
+      <div class="scan-panel" id="scanPanel">
+        <div class="scan-header">
+          <span class="scan-title">🔍 Live scan</span>
+          <span class="scan-hint" id="scanHint">open a LinkedIn search-results tab to scan</span>
+        </div>
+        <div class="scan-actions scan-actions-top">
+          <select id="autoScrollDuration" title="How long to keep auto-scrolling">
+            <option value="60">1 min</option>
+            <option value="120">2 min</option>
+            <option value="300" selected>5 min</option>
+            <option value="600">10 min</option>
+            <option value="1800">30 min</option>
+            <option value="0">∞ Until stopped</option>
+          </select>
+          <button id="autoScrollBtn" class="primary-btn" disabled title="Randomly scroll the LinkedIn feed like a human. Toggle again to stop.">🖱 Auto-scroll</button>
+        </div>
+        <div id="autoScrollProgress" class="auto-scroll-progress" style="display:none">
+          <div class="auto-scroll-progress-head">
+            <span id="autoScrollProgressLabel">Hop 0 · 0% · 0s left</span>
+          </div>
+          <div class="auto-scroll-progress-bar">
+            <div class="auto-scroll-progress-fill" id="autoScrollProgressFill"></div>
+          </div>
+        </div>
+        <div class="scan-actions">
+          <button id="scanNowBtn" class="primary-btn" disabled>🔍 Scan this page</button>
+          <button id="scanSaveAllBtn" disabled title="Save every unsaved lead to the LinkedIn sheet">💾 Save all</button>
+          <button id="scanClearBtn" disabled>🧹 Clear</button>
+        </div>
+        <label class="scan-toggle" style="display:none">
+          <input type="checkbox" id="scanAutoGenEmail" />
+          <span>📧 Auto-generate email on save</span>
+        </label>
+        <div class="scan-hint" style="font-size:11px;color:#6b6b7a;margin:2px 0 6px;">
+          ⚡ Scrape-only. Drafts generate on the dashboard (parallel, much faster).
+        </div>
+
+        <div id="scanProgress" class="scan-progress" style="display:none">
+          <div class="scan-progress-head">
+            <span class="scan-progress-label" id="scanProgressLabel">Saving 0 / 0</span>
+            <span class="scan-progress-eta"   id="scanProgressEta">—</span>
+          </div>
+          <div class="scan-progress-bar">
+            <div class="scan-progress-fill" id="scanProgressFill"></div>
+          </div>
+        </div>
+
+        <div id="scanStatus" class="status"></div>
+        <div id="scanLeadsWrap" class="scan-leads-wrap"></div>
+      </div>
+
+      <div class="bulk-filters">
+        <label class="bulk-filter-chip">
+          <input type="checkbox" id="bulkFilterRemote" checked />
+          <span>🌐 Remote</span>
+        </label>
+        <label class="bulk-filter-chip">
+          <input type="checkbox" id="bulkFilterContract" checked />
+          <span>📝 Contract</span>
+        </label>
+      </div>
+
+      <label class="field-label" for="bulkQueries">Search queries (one per line)</label>
+      <textarea id="bulkQueries" rows="8" placeholder="python developer hiring&#10;FastAPI developer&#10;LangGraph engineer…"></textarea>
+
+      <label class="field-label">Locations (pick any — "global" = worldwide/remote)</label>
+      <div id="bulkLocationsGrid" class="bulk-locations-grid"></div>
+
+      <div class="bulk-actions">
+        <button id="bulkSaveBtn">💾 Save lists</button>
+        <button id="bulkResetDefaultsBtn">↺ Reset defaults</button>
+      </div>
+
+      <hr class="bulk-sep" />
+
+      <div class="bulk-actions">
+        <button id="bulkOpenNextBtn" class="primary-btn">▶ Open next URL</button>
+      </div>
+
+      <div id="bulkStatus" class="status"></div>
+
+      <!-- Keep an invisible list container so existing render code has
+           somewhere to write; the collapsible <details> was removed per
+           UX request but we still render internally for state tracking. -->
+      <ol id="bulkUrlList" class="bulk-url-list" style="display:none"></ol>
+    </section>
+
+    <!-- ============ REPLY TAB ============ -->
+    <section class="tab-pane" id="tab-reply">
+      <div class="info-card">
+        <p>
+          📩 Open any LinkedIn message thread (
+          <a href="https://www.linkedin.com/messaging/" target="_blank" rel="noopener">linkedin.com/messaging</a>
+          ), then click below.
+        </p>
+      </div>
+
+      <div id="bridgeHealth" class="bridge-health bh-unknown">
+        <span class="bh-dot"></span>
+        <span class="bh-text">Checking bridge…</span>
+      </div>
+
+      <button id="generateReplyBtn" class="primary-btn">✨ Generate Reply</button>
+
+      <div id="replyStatus" class="status"></div>
+
+      <div id="replyPreview" class="reply-preview" style="display:none">
+        <label>Reply preview (you can edit):</label>
+        <textarea id="replyText" rows="6"></textarea>
+
+        <div class="refine-row">
+          <span class="refine-label">Refine:</span>
+          <button class="refine-btn" data-refine="shorter">✂ Shorter</button>
+          <button class="refine-btn" data-refine="casual">😎 Casual</button>
+          <button class="refine-btn" data-refine="formal">💼 Formal</button>
+          <button class="refine-btn" data-refine="ask_call">📞 Ask call</button>
+          <button class="refine-btn" data-refine="ask_budget">💰 Ask budget</button>
+          <button class="refine-btn" data-refine="ask_clarify">❓ Clarify</button>
+        </div>
+
+        <div class="reply-actions">
+          <button id="pasteReplyBtn" class="primary-btn">📝 Paste into LinkedIn</button>
+          <button id="copyReplyBtn">📋 Copy</button>
+          <button id="regenerateBtn">🔄 Regenerate</button>
+        </div>
+        <div id="replyPasteStatus" class="status"></div>
+      </div>
+    </section>
+
+    <!-- ============ POSTS TAB ============ -->
+    <section class="tab-pane" id="tab-posts">
+      <div class="info-card">
+        <p>
+          ✍ <strong>LinkedIn post drafts.</strong> Generates 3 variants per run.
+          Pick, edit, and click <strong>Open + Paste</strong> — the post opens
+          in LinkedIn's composer ready to review. <em>You click Post yourself.</em>
+        </p>
+      </div>
+
+      <div id="postsBridgeHealth" class="bridge-health bh-unknown">
+        <span class="bh-dot"></span>
+        <span class="bh-text">Checking bridge…</span>
+      </div>
+
+      <div class="posts-controls">
+        <div class="posts-picker-row">
+          <label class="posts-picker-label">Length</label>
+          <div class="posts-chip-group" id="postsLengthGroup">
+            <label class="posts-chip"><input type="radio" name="postsLength" value="short" /><span>Short</span></label>
+            <label class="posts-chip"><input type="radio" name="postsLength" value="medium" checked /><span>Medium</span></label>
+            <label class="posts-chip"><input type="radio" name="postsLength" value="long" /><span>Long</span></label>
+          </div>
+        </div>
+
+        <div class="posts-picker-row">
+          <label class="posts-picker-label">Tone</label>
+          <div class="posts-chip-group" id="postsToneGroup">
+            <label class="posts-chip"><input type="radio" name="postsTone" value="casual" checked /><span>Casual</span></label>
+            <label class="posts-chip"><input type="radio" name="postsTone" value="technical" /><span>Technical</span></label>
+            <label class="posts-chip"><input type="radio" name="postsTone" value="storytelling" /><span>Story</span></label>
+            <label class="posts-chip"><input type="radio" name="postsTone" value="hot-take" /><span>Hot-take</span></label>
+          </div>
+        </div>
+
+        <button id="postsGenerateBtn" class="primary-btn">✨ Generate 3 variants</button>
+      </div>
+
+      <div id="postsStatus" class="status"></div>
+
+      <div class="posts-section-head">
+        <span class="posts-section-title">Drafts</span>
+        <label class="posts-auto-toggle">
+          <input type="checkbox" id="postsAutoDraftToggle" />
+          <span>Daily auto-draft at</span>
+          <input type="number" id="postsAutoDraftHour" min="0" max="23" value="9" />
+          <span>:00</span>
+        </label>
+      </div>
+      <div id="postsDraftsWrap" class="posts-drafts-wrap"></div>
+    </section>
+
+    <!-- ============ SETTINGS TAB ============ -->
+    <section class="tab-pane" id="tab-settings">
+      <div class="settings-group">
+        <h3>Claude Backend</h3>
+
+        <div id="settingsBridgeHealth" class="bridge-health bh-unknown">
+          <span class="bh-dot"></span>
+          <span class="bh-text">Checking bridge…</span>
+        </div>
+
+        <div class="mode-switch">
+          <label class="mode-option">
+            <input type="radio" name="claudeBackend" value="bridge" />
+            <div>
+              <strong>🌉 Local Bridge (Claude.ai Max subscription)</strong>
+              <p>Routes through a local FastAPI server + Claude Code CLI. Uses your Max subscription — no API costs.</p>
+              <small>Setup: install Claude Code, run <code>claude login</code>, then start the bridge server.</small>
+            </div>
+          </label>
+          <label class="mode-option">
+            <input type="radio" name="claudeBackend" value="direct" />
+            <div>
+              <strong>🔑 Direct API (Anthropic Console)</strong>
+              <p>Calls api.anthropic.com with your API key. Pay-per-use (~$0.01 per reply).</p>
+            </div>
+          </label>
+        </div>
+
+        <!-- Bridge URL + Test are only meaningful for bridge mode; hidden in direct mode -->
+        <div id="bridgeSection">
+          <label for="bridgeUrlInput">Bridge URL</label>
+          <input type="text" id="bridgeUrlInput" value="http://127.0.0.1:8765" />
+        </div>
+
+        <div class="settings-actions">
+          <button id="saveBackendBtn" class="primary-btn">Save backend</button>
+          <button id="testBridgeBtn">Test bridge</button>
+        </div>
+        <div id="backendStatus" class="status"></div>
+      </div>
+
+      <div class="settings-group sheet-config-card">
+        <h3>🗂 Dashboard</h3>
+
+        <div class="sheet-field">
+          <div class="sheet-field-head">
+            <div class="sheet-field-titles">
+              <span class="sheet-field-title">🔑 API key</span>
+              <span class="sheet-field-desc">Issued at <code>http://localhost:3000/linkedin/settings</code> → Extension keys</span>
+            </div>
+            <span id="sheetEndpointBadge" class="sheet-badge sheet-badge-muted">not set</span>
+          </div>
+          <input
+            type="password"
+            id="sheetWebhookInput"
+            placeholder="li_xxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+            autocomplete="off"
+          />
+        </div>
+
+        <div class="sheet-field">
+          <div class="sheet-field-head">
+            <div class="sheet-field-titles">
+              <span class="sheet-field-title">🌐 Backend API base</span>
+              <span class="sheet-field-desc">Where ingest/overview POST go. Default <code>http://localhost:8900</code>. Change when using a tunnel / production URL.</span>
+            </div>
+            <span id="dashboardBaseBadge" class="sheet-badge sheet-badge-muted">default</span>
+          </div>
+          <input
+            type="text"
+            id="dashboardBaseUrlInput"
+            placeholder="https://api.bitcodingsolutions.com"
+            autocomplete="off"
+          />
+        </div>
+
+        <div class="sheet-field">
+          <div class="sheet-field-head">
+            <div class="sheet-field-titles">
+              <span class="sheet-field-title">🔗 Dashboard URL</span>
+              <span class="sheet-field-desc">Opens LinkedIn page in dashboard from the 📂 button</span>
+            </div>
+            <span id="sheetViewBadge" class="sheet-badge sheet-badge-muted">not set</span>
+          </div>
+          <input
+            type="text"
+            id="sheetViewUrlInput"
+            placeholder="http://localhost:3000/linkedin/leads"
+            autocomplete="off"
+          />
+        </div>
+
+        <div class="settings-actions sheet-actions">
+          <button id="saveSheetBtn" class="primary-btn">💾 Save config</button>
+          <button id="testSheetBtn">Test endpoint</button>
+          <button id="openSheetFromSettingsBtn">📂 Open sheet</button>
+        </div>
+        <div id="sheetStatus" class="status"></div>
+        <div id="sheetViewStatus" class="status" style="display:none"></div>
+      </div>
+
+      <div class="settings-group" id="apiKeyGroup">
+        <h3>Claude API Key (for Direct API mode)</h3>
+        <label for="apiKeyInput">API key (sk-ant-...)</label>
+        <input type="password" id="apiKeyInput" placeholder="sk-ant-api..." autocomplete="off" />
+        <div class="settings-actions">
+          <button id="saveKeyBtn" class="primary-btn">Save key</button>
+          <button id="clearKeyBtn">Clear</button>
+        </div>
+        <div id="keyStatus" class="status"></div>
+        <p class="hint">
+          Key stored locally in chrome.storage.local. Never transmitted anywhere
+          except Anthropic's API when generating a reply.
+        </p>
+      </div>
+
+      <div class="settings-group">
+        <h3>Reply style</h3>
+        <label>Sign-off</label>
+        <input type="text" id="signOffInput" value="Best, Jaydip" />
+        <label>Tone</label>
+        <select id="toneSelect">
+          <option value="professional-friendly">Professional-friendly (default)</option>
+          <option value="formal">Formal</option>
+          <option value="casual">Casual</option>
+        </select>
+        <label>Max lines</label>
+        <select id="maxLinesSelect">
+          <option value="2-4" selected>2–4 lines</option>
+          <option value="1-2">1–2 lines</option>
+          <option value="5-7">5–7 lines</option>
+        </select>
+        <label>Phone number (optional — used only when a reply needs it)</label>
+        <input type="text" id="contactPhoneInput" placeholder="+91 78028 30436" autocomplete="off" />
+        <p class="hint">
+          If blank, Claude will never mention a phone number. If filled,
+          Claude uses EXACTLY this number — no invented digits.
+        </p>
+        <div class="settings-actions">
+          <button id="saveStyleBtn" class="primary-btn">Save style</button>
+        </div>
+        <div id="styleStatus" class="status"></div>
+      </div>
+
+      <div class="settings-group">
+        <h3>Safety Mode (Reply)</h3>
+        <div class="mode-switch">
+          <label class="mode-option">
+            <input type="radio" name="safetyMode" value="max" />
+            <div>
+              <strong>🛡 Maximum Safety (recommended)</strong>
+              <p>Reply tab shows Copy only — you paste into LinkedIn manually. Lower daily cap + longer cooldown.</p>
+              <small>Cap: 20 replies / day · 3 min cooldown</small>
+            </div>
+          </label>
+          <label class="mode-option">
+            <input type="radio" name="safetyMode" value="normal" />
+            <div>
+              <strong>⚡ Normal</strong>
+              <p>Reply tab lets the extension paste directly into LinkedIn's reply box. You still click Send.</p>
+              <small>Cap: 30 replies / day · 90s cooldown</small>
+            </div>
+          </label>
+        </div>
+        <div id="modeStatus" class="status"></div>
+      </div>
+
+      <div class="settings-group">
+        <h3>Account Health</h3>
+        <div class="safety-info" id="safetyInfoText"></div>
+        <div id="warningCard" class="warning-card" style="display:none"></div>
+      </div>
+    </section>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
