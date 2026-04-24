@@ -24,24 +24,28 @@ import requests
 BRIDGE_URL = "http://127.0.0.1:8765/generate-reply"
 BRIDGE_TIMEOUT_S = 180
 
-# Phrase-based fallback used when the Bridge is unreachable. Mirrors the
-# legacy regex blocklist — conservative: marks the post for skip when the
-# signal is very strong, otherwise leaves the lead drafted (no body) and
-# flags for manual review.
-_SKIP_PHRASES: list[tuple[re.Pattern[str], str]] = [
-    (re.compile(r"\b(onsite only|must be onsite|in[- ]office only|no remote)\b", re.I),
-     "onsite only"),
-    (re.compile(r"\bfull[- ]time only\b", re.I),
-     "full-time only no contract"),
-    (re.compile(r"\b(w-?2 only|us citizen(s|ship)? (only|required))\b", re.I),
-     "W2 / US-only"),
-    (re.compile(r"\b(green\s*card|gc\s*required|visa sponsorship not available)\b", re.I),
-     "visa required"),
-    (re.compile(r"\b(intern(ship)?|trainee|junior only|0-2 yrs?)\b", re.I),
-     "junior/intern"),
-    (re.compile(r"\b(open to work|looking for (?:a|my next) (?:role|opportunity|job))\b", re.I),
-     "not a job post"),
-]
+
+class BridgeUnreachable(Exception):
+    """Claude Bridge (localhost:8765) is offline or unreachable. Raised by
+    generate_draft so the caller can refuse cleanly instead of falling back
+    to a regex-only decision that might mis-archive a real lead."""
+
+
+class BridgeParseError(Exception):
+    """Bridge answered but the payload wasn't a parseable JSON object.
+    Transient — the caller should surface as a retryable 502."""
+
+
+def bridge_is_up(timeout: float = 1.5) -> bool:
+    """Cheap health probe. Returns True if the Bridge answers on /. Used
+    by batch-drafter preflight so we don't spawn a worker that would
+    immediately refuse every lead."""
+    try:
+        r = requests.get("http://127.0.0.1:8765/", timeout=timeout)
+        return 200 <= r.status_code < 500
+    except requests.exceptions.RequestException:
+        return False
+
 
 # Specialty keyword clusters for CV picking.
 # Clusters are scored by "count of matching keywords in the post", highest
@@ -99,7 +103,7 @@ class DraftResult:
     email_mode: str  # individual | company
     should_skip: bool
     skip_reason: Optional[str]
-    skip_source: str  # claude | bridge_error
+    skip_source: str  # claude | "" — Bridge-less paths now raise, not fall back
     cv_cluster: Optional[str]
     raw: str
 
@@ -246,14 +250,17 @@ def generate_draft(
         r.raise_for_status()
         reply = (r.json() or {}).get("reply", "")
         data = _parse_json(reply)
-    except (requests.exceptions.RequestException, ValueError) as e:
-        # Bridge down or unparseable reply — run the local regex fallback so
-        # at minimum we can auto-skip obvious junk and surface the post for
-        # manual review.
-        return _fallback_decision(
-            post_text=post_text, role=role, tech_stack=tech_stack,
-            bridge_error=str(e)[:200],
-        )
+    except requests.exceptions.RequestException as e:
+        # Bridge offline / network down. We refuse to draft — a regex-only
+        # skip decision could archive a genuine lead, and a drafter without
+        # Claude's brain is worse than no draft at all. Caller (the route
+        # handler) converts this to a user-visible 503.
+        raise BridgeUnreachable(str(e)[:200]) from e
+    except ValueError as e:
+        # Bridge answered but returned garbage we couldn't parse. This is a
+        # Claude/Bridge-side hiccup, not a connectivity issue — surface it
+        # distinctly so the caller can retry the same lead safely.
+        raise BridgeParseError(str(e)[:200]) from e
     subject = _strip_dashes(str(data.get("email_subject", "")).strip())
     body = _strip_dashes(str(data.get("email_body", "")).strip())
     mode = str(data.get("email_mode", "individual")).strip().lower()
@@ -273,39 +280,6 @@ def generate_draft(
         skip_source="claude" if should_skip else "",
         cv_cluster=cv_cluster,
         raw=reply,
-    )
-
-
-def _fallback_decision(
-    *, post_text: str, role: str, tech_stack: str, bridge_error: str,
-) -> DraftResult:
-    """Bridge unreachable — decide skip from regex. No draft body produced;
-    caller will see status=Drafted with empty subject/body, or an auto-skip."""
-    haystack = f"{post_text}\n{role}\n{tech_stack}"
-    for pattern, reason in _SKIP_PHRASES:
-        if pattern.search(haystack):
-            return DraftResult(
-                subject="",
-                body="",
-                email_mode="individual",
-                should_skip=True,
-                skip_reason=reason,
-                skip_source="regex_fallback",
-                cv_cluster=classify_specialty(haystack),
-                raw=f"(bridge unreachable: {bridge_error})",
-            )
-    # Nothing strong enough to auto-skip — return an empty draft so the lead
-    # stays at status=New; Jaydip can re-trigger generate once the Bridge
-    # is back up.
-    return DraftResult(
-        subject="",
-        body="",
-        email_mode="individual",
-        should_skip=False,
-        skip_reason=None,
-        skip_source="",
-        cv_cluster=classify_specialty(haystack),
-        raw=f"(bridge unreachable: {bridge_error})",
     )
 
 

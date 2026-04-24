@@ -27,7 +27,12 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field, field_validator
 
 from linkedin_db import connect, init
-from linkedin_claude import generate_draft as _claude_generate
+from linkedin_claude import (
+    BridgeParseError,
+    BridgeUnreachable,
+    bridge_is_up,
+    generate_draft as _claude_generate,
+)
 import linkedin_claude
 import linkedin_scoring
 import linkedin_gmail as gmail
@@ -895,6 +900,18 @@ def generate_draft(lead_id: int):
             location=row["location"] or "",
             post_text=row["post_text"] or "",
         )
+    except BridgeUnreachable as e:
+        # Bridge offline. Refuse to draft — a regex-only fallback would risk
+        # archiving real leads. Leave the lead at its current status so the
+        # user can retry after bringing the Bridge back up.
+        raise HTTPException(
+            503,
+            f"Claude Bridge offline — cannot generate drafts without it. "
+            f"Start the Bridge (Bridge online header button) and retry. "
+            f"Detail: {e}",
+        )
+    except BridgeParseError as e:
+        raise HTTPException(502, f"Bridge returned unparseable output — retry: {e}")
     except Exception as e:
         raise HTTPException(500, f"Draft generation failed: {e}")
 
@@ -985,6 +1002,21 @@ def _generate_one(lead_id: int) -> str:
             location=row["location"] or "",
             post_text=row["post_text"] or "",
         )
+    except BridgeUnreachable as e:
+        # Bridge dropped mid-batch. Leave the lead at status=New and bubble
+        # the specific reason so the worker's shared state can tell the UI
+        # "Bridge offline, N leads skipped" — no data mutation, safe retry.
+        with connect() as con:
+            _log_event(con, "draft_bridge_offline",
+                       lead_id=lead_id, meta={"error": str(e)[:200]})
+            con.commit()
+        return "bridge_offline"
+    except BridgeParseError as e:
+        with connect() as con:
+            _log_event(con, "draft_parse_error",
+                       lead_id=lead_id, meta={"error": str(e)[:200]})
+            con.commit()
+        return "failed"
     except Exception as e:
         with connect() as con:
             _log_event(con, "draft_error", lead_id=lead_id, meta={"error": str(e)[:200]})
@@ -1006,23 +1038,33 @@ def _generate_one(lead_id: int) -> str:
             con.commit()
             return "skipped"
 
-        new_status = "Drafted" if (result.subject or result.body) else "New"
+        # Claude produced a non-skip verdict but an empty body — rare, but
+        # we want this loud, not silently treated as "drafted". Mark failed
+        # so the user can retry rather than ship an empty mail.
+        if not (result.subject and result.body):
+            with connect() as con:
+                _log_event(con, "draft_empty_result",
+                           lead_id=lead_id,
+                           meta={"mode": result.email_mode})
+                con.commit()
+            return "failed"
+
         con.execute(
             "UPDATE leads SET gen_subject = ?, gen_body = ?, email_mode = ?, "
-            "cv_cluster = ?, status = ?, skip_reason = NULL, "
+            "cv_cluster = ?, status = 'Drafted', skip_reason = NULL, "
             "skip_source = NULL WHERE id = ?",
             (result.subject, result.body, result.email_mode,
-             result.cv_cluster, new_status, lead_id),
+             result.cv_cluster, lead_id),
         )
-        _log_event(con, "draft" if new_status == "Drafted" else "draft_fallback",
-                   lead_id=lead_id,
+        _log_event(con, "draft", lead_id=lead_id,
                    meta={"mode": result.email_mode, "cv": result.cv_cluster})
         con.commit()
-        return "drafted" if new_status == "Drafted" else "failed"
+        return "drafted"
 
 
 def _drafts_worker(lead_ids: list[int]) -> None:
     from concurrent.futures import ThreadPoolExecutor, as_completed
+    bridge_offline_count = 0
     try:
         with ThreadPoolExecutor(max_workers=DRAFT_WORKERS) as pool:
             futures = {pool.submit(_generate_one, lid): lid for lid in lead_ids}
@@ -1036,6 +1078,13 @@ def _drafts_worker(lead_ids: list[int]) -> None:
                     _drafts_state["drafted"] += 1
                 elif outcome == "skipped":
                     _drafts_state["skipped"] += 1
+                elif outcome == "bridge_offline":
+                    bridge_offline_count += 1
+                    _drafts_state["failed"] += 1
+                    _drafts_state["last_error"] = (
+                        f"Claude Bridge went offline — {bridge_offline_count} lead(s) "
+                        "skipped without mutation. Start the Bridge and retry."
+                    )
                 else:
                     _drafts_state["failed"] += 1
     finally:
@@ -1048,6 +1097,16 @@ def generate_drafts_batch(payload: DraftBatchIn):
     with _drafts_lock:
         if _drafts_state["running"]:
             raise HTTPException(409, "A draft batch is already running")
+        # Preflight Bridge health. Refusing at the door is far safer than
+        # spawning a worker that would refuse every lead and look like the
+        # batch "crashed". A single-shot probe (~1.5s) keeps the latency
+        # unnoticeable when the Bridge IS up.
+        if not bridge_is_up():
+            raise HTTPException(
+                503,
+                "Claude Bridge offline — cannot start a draft batch. "
+                "Click 'Bridge online' in the header to launch it, then retry.",
+            )
 
         with connect() as con:
             rows = con.execute(
