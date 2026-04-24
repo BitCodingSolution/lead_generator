@@ -266,35 +266,63 @@ export function LinkedInLeadDrawer({
             <Facts lead={lead} />
 
             <section>
-              <div className="flex items-center justify-between mb-2">
-                <div className="text-[11px] font-medium uppercase tracking-[0.1em] text-zinc-500">
-                  Draft
-                </div>
-                <button
-                  onClick={onGenerate}
-                  disabled={!!busy}
-                  className="inline-flex items-center gap-1.5 rounded-md bg-[hsl(250_80%_62%)] px-2.5 py-1 text-xs text-white hover:brightness-110 disabled:opacity-50"
-                >
-                  {busy === "draft" ? (
-                    <Loader2 className="size-3 animate-spin" />
-                  ) : (
-                    <Sparkles className="size-3" />
-                  )}
-                  {lead.gen_subject ? "Regenerate" : "Generate"}
-                </button>
-              </div>
+              {(() => {
+                // Once the cold mail is on its way (Sent / Replied), the
+                // top section is the historical record of what we sent.
+                // Regenerating that draft makes no sense — the new draft
+                // would never go out, and the user might think it had.
+                // Reply-thread regenerate lives in RepliesSection below.
+                const alreadySent =
+                  lead.status === "Sent" || lead.status === "Replied"
+                return (
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="text-[11px] font-medium uppercase tracking-[0.1em] text-zinc-500">
+                      {alreadySent ? "Sent message" : "Draft"}
+                    </div>
+                    {alreadySent ? (
+                      <span className="inline-flex items-center gap-1 rounded bg-emerald-500/15 px-1.5 py-0.5 text-[10px] text-emerald-300">
+                        <Check className="size-2.5" />
+                        Sent {lead.sent_at ? fmtRelativeTs(lead.sent_at) : ""}
+                      </span>
+                    ) : (
+                      <button
+                        onClick={onGenerate}
+                        disabled={!!busy}
+                        className="inline-flex items-center gap-1.5 rounded-md bg-[hsl(250_80%_62%)] px-2.5 py-1 text-xs text-white hover:brightness-110 disabled:opacity-50"
+                      >
+                        {busy === "draft" ? (
+                          <Loader2 className="size-3 animate-spin" />
+                        ) : (
+                          <Sparkles className="size-3" />
+                        )}
+                        {lead.gen_subject ? "Regenerate" : "Generate"}
+                      </button>
+                    )}
+                  </div>
+                )
+              })()}
               <input
                 value={subject}
                 onChange={(e) => setSubject(e.target.value)}
+                readOnly={lead.status === "Sent" || lead.status === "Replied"}
                 placeholder="Subject line…"
-                className="w-full rounded-md border border-zinc-800 bg-zinc-900/60 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:border-[hsl(250_80%_62%)]"
+                className={cn(
+                  "w-full rounded-md border border-zinc-800 bg-zinc-900/60 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:border-[hsl(250_80%_62%)]",
+                  (lead.status === "Sent" || lead.status === "Replied") &&
+                    "opacity-70 cursor-default focus:border-zinc-800",
+                )}
               />
               <textarea
                 value={body}
                 onChange={(e) => setBody(e.target.value)}
+                readOnly={lead.status === "Sent" || lead.status === "Replied"}
                 rows={10}
                 placeholder="Email body…"
-                className="mt-2 w-full rounded-md border border-zinc-800 bg-zinc-900/60 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 font-mono leading-relaxed focus:outline-none focus:border-[hsl(250_80%_62%)]"
+                className={cn(
+                  "mt-2 w-full rounded-md border border-zinc-800 bg-zinc-900/60 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 font-mono leading-relaxed focus:outline-none focus:border-[hsl(250_80%_62%)]",
+                  (lead.status === "Sent" || lead.status === "Replied") &&
+                    "opacity-70 cursor-default focus:border-zinc-800",
+                )}
               />
               <div className="mt-2 flex items-center justify-between">
                 <div className="text-[11px] text-zinc-500">
@@ -477,6 +505,20 @@ function fmtTs(iso: string): string {
       minute: "2-digit",
     })
   } catch { return iso }
+}
+
+function fmtRelativeTs(iso: string): string {
+  try {
+    const diffMs = Date.now() - new Date(iso).getTime()
+    if (diffMs < 0) return ""
+    const m = Math.floor(diffMs / 60_000)
+    if (m < 1) return "just now"
+    if (m < 60) return `${m}m ago`
+    const h = Math.floor(m / 60)
+    if (h < 24) return `${h}h ago`
+    const d = Math.floor(h / 24)
+    return `${d}d ago`
+  } catch { return "" }
 }
 
 function Facts({ lead }: { lead: LeadFull }) {
@@ -777,12 +819,9 @@ function RepliesSection({
         hint.trim() ? { hint: hint.trim() } : undefined,
       )
       setDraftBody(res.body || "")
-      if (!res.body) {
-        setToast("Bridge returned empty draft")
-      } else {
-        // Hint consumed — clear it so the next regen starts fresh.
-        setHint("")
-      }
+      if (!res.body) setToast("Bridge returned empty draft")
+      // Hint stays — user can tweak it and regenerate again. Caller can
+      // explicitly clear it via the Clear hint button below the textarea.
     } catch (e) {
       setToast((e as Error).message)
     } finally {
@@ -895,8 +934,17 @@ function RepliesSection({
                 className="w-full resize-none rounded border border-zinc-800 bg-zinc-900/40 px-2 py-1.5 text-[12px] text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-[hsl(280_80%_62%)] leading-relaxed"
               />
               {hint.trim() && (
-                <div className="mt-0.5 text-[10px] text-[hsl(280_80%_78%)]">
-                  ✨ Regenerate will use this hint
+                <div className="mt-0.5 flex items-center justify-between text-[10px]">
+                  <span className="text-[hsl(280_80%_78%)]">
+                    ✨ Regenerate will use this hint
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setHint("")}
+                    className="text-zinc-500 hover:text-zinc-300 underline-offset-2 hover:underline"
+                  >
+                    Clear hint
+                  </button>
                 </div>
               )}
             </div>
