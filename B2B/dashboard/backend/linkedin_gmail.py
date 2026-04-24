@@ -33,6 +33,7 @@ import email.header
 import email.utils
 import imaplib
 import json
+import os
 import re
 import secrets
 import smtplib
@@ -323,10 +324,35 @@ def get_account_creds(account_id: int) -> Optional[tuple[str, str]]:
     return r["email"], _decrypt(r["app_password_enc"])
 
 
+# Per-account cooldown: after any account sends, it can't send again for
+# MIN_ACCOUNT_GAP_S seconds. Protects the edge case where one account
+# carries the whole load (e.g. its sibling is paused) — without this rail
+# the global 60-90s batch jitter becomes the *per-account* cadence, which
+# looks bot-like at scale.
+MIN_ACCOUNT_GAP_S = int(os.environ.get("DASHBOARD_MIN_ACCT_GAP_S", "300"))
+
+
+def _cooldown_remaining_s(last_sent_at: Optional[str], now: dt.datetime) -> int:
+    """Seconds this account still has to wait before its next send. 0 if
+    clear. Invalid timestamps are treated as 0 (fail open)."""
+    if not last_sent_at:
+        return 0
+    try:
+        last = dt.datetime.fromisoformat(last_sent_at)
+    except Exception:
+        return 0
+    elapsed = (now - last).total_seconds()
+    return max(0, int(MIN_ACCOUNT_GAP_S - elapsed))
+
+
 def pick_next_account_id() -> Optional[int]:
-    """Pick an active account with remaining effective (warmup-aware) quota.
-    Round-robins by oldest last_sent_at so accounts alternate evenly."""
+    """Pick an active account with remaining effective (warmup-aware) quota
+    AND past its per-account cooldown. Round-robins by oldest last_sent_at
+    so accounts alternate evenly. Returns None if no account can send *right
+    now* — caller should use seconds_until_next_account() to tell idle-cooldown
+    apart from truly-exhausted quota."""
     today = _today()
+    now = dt.datetime.now()
     with connect() as con:
         _roll_if_stale_day(con, today)
         con.commit()
@@ -355,9 +381,52 @@ def pick_next_account_id() -> Optional[int]:
                 r["warmup_start_date"] or r["connected_at"],
                 curve=curve,
             )
-            if cur < cap:
-                return r["id"]
+            if cur >= cap:
+                continue
+            if _cooldown_remaining_s(r["last_sent_at"], now) > 0:
+                continue
+            return r["id"]
     return None
+
+
+def seconds_until_next_account() -> Optional[int]:
+    """Non-zero seconds to wait if every eligible account is only in
+    cooldown (has quota remaining but sent too recently). Returns:
+      - 0 if at least one account is ready now
+      - int > 0 if some account will be ready after waiting
+      - None if ALL accounts are out of quota for today (the caller should
+        stop, not wait)
+    """
+    today = _today()
+    now = dt.datetime.now()
+    min_wait: Optional[int] = None
+    any_has_quota = False
+    with connect() as con:
+        rows = con.execute(
+            "SELECT sent_today, sent_date, daily_cap, last_sent_at, "
+            "       warmup_enabled, warmup_start_date, connected_at "
+            "FROM gmail_accounts WHERE status = 'active'"
+        ).fetchall()
+        curve = get_warmup_curve()
+    for r in rows:
+        cur = r["sent_today"] if r["sent_date"] == today else 0
+        cap = effective_cap(
+            int(r["daily_cap"]),
+            bool(r["warmup_enabled"]),
+            r["warmup_start_date"] or r["connected_at"],
+            curve=curve,
+        )
+        if cur >= cap:
+            continue
+        any_has_quota = True
+        wait = _cooldown_remaining_s(r["last_sent_at"], now)
+        if wait == 0:
+            return 0
+        if min_wait is None or wait < min_wait:
+            min_wait = wait
+    if not any_has_quota:
+        return None  # nobody has quota — truly exhausted
+    return min_wait or 0
 
 
 def reconcile_today_counts() -> dict:

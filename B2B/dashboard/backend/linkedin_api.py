@@ -123,6 +123,7 @@ class SafetyState(BaseModel):
     autopilot_enabled: bool
     autopilot_hour: int
     autopilot_tz: str
+    business_hours_only: bool
     safety_mode: str
 
 
@@ -296,6 +297,7 @@ class SafetyPatch(BaseModel):
     autopilot_enabled: Optional[bool] = None
     autopilot_hour: Optional[int] = Field(default=None, ge=0, le=23)
     autopilot_tz: Optional[str] = Field(default=None, max_length=64)
+    business_hours_only: Optional[bool] = None
     clear_warning_pause: Optional[bool] = None
 
 
@@ -325,6 +327,8 @@ def update_safety(patch: SafetyPatch):
             except Exception:
                 raise HTTPException(400, f"Invalid IANA timezone: {tz}")
         db_updates["autopilot_tz"] = tz
+    if "business_hours_only" in updates:
+        db_updates["business_hours_only"] = 1 if updates["business_hours_only"] else 0
     if updates.get("clear_warning_pause"):
         db_updates["warning_paused_until"] = None
 
@@ -358,6 +362,9 @@ def get_safety() -> SafetyState:
             # via the keys(); default to empty string so pydantic doesn't
             # 500 until the schema catches up.
             autopilot_tz=(r["autopilot_tz"] if "autopilot_tz" in r.keys() else "") or "",
+            business_hours_only=bool(
+                r["business_hours_only"] if "business_hours_only" in r.keys() else 0
+            ),
             safety_mode=r["safety_mode"],
         )
 
@@ -1306,11 +1313,25 @@ def _check_safety_before_send(con, *, allow_quiet_hours: bool = False) -> None:
         )
 
     if not allow_quiet_hours:
-        h = dt.datetime.now().hour
-        if h >= 23 or h < 7:
-            raise HTTPException(
-                423, "Quiet hours active (23:00–07:00 local)"
-            )
+        now = dt.datetime.now()
+        strict = bool(s["business_hours_only"]) if "business_hours_only" in s.keys() else False
+        if strict:
+            # Strict B2B schedule: Mon-Fri, 09-18 local. Weekends or
+            # before/after hours → refuse.
+            if now.weekday() >= 5:
+                raise HTTPException(
+                    423, "Business-hours-only mode: no sends on weekends",
+                )
+            if now.hour < 9 or now.hour >= 18:
+                raise HTTPException(
+                    423, "Business-hours-only mode: sends allowed 09:00–18:00 local",
+                )
+        else:
+            # Loose default: just avoid the obvious bot window.
+            if now.hour >= 23 or now.hour < 7:
+                raise HTTPException(
+                    423, "Quiet hours active (23:00–07:00 local)",
+                )
 
 
 # 1x1 transparent GIF, served on every /t/open/*.gif hit.
@@ -2038,9 +2059,32 @@ def _batch_worker(lead_ids: list[int], source: str) -> None:
 
             picked_account_id = gmail.pick_next_account_id()
             if picked_account_id is None:
-                _batch_state["last_error"] = "No Gmail account with remaining quota"
-                _batch_state["skipped"] += 1
-                break
+                # Could be "quota exhausted" (stop) OR "all accounts in
+                # cooldown" (wait). seconds_until_next_account differentiates.
+                wait_s = gmail.seconds_until_next_account()
+                if wait_s is None:
+                    _batch_state["last_error"] = (
+                        "No Gmail account with remaining quota"
+                    )
+                    _batch_state["skipped"] += 1
+                    break
+                # Accounts have quota but are cooling down. Wait for the
+                # soonest one (+ small buffer) and retry this same lead.
+                wait_s = max(10, wait_s + 5)
+                _batch_state["last_error"] = (
+                    f"All accounts cooling down — waiting {wait_s}s"
+                )
+                if _batch_stop_event.wait(timeout=wait_s):
+                    break
+                picked_account_id = gmail.pick_next_account_id()
+                if picked_account_id is None:
+                    # Still nothing after the wait — treat as exhausted.
+                    _batch_state["last_error"] = (
+                        "Cooldown elapsed but no account is available"
+                    )
+                    _batch_state["skipped"] += 1
+                    break
+                _batch_state["last_error"] = None
 
             with connect() as con:
                 token = _ensure_open_token(con, lead_id)
@@ -2529,6 +2573,29 @@ def _poll_and_store() -> dict:
                     "needs_attention = 1 WHERE id = ? AND status != 'Replied'",
                     (m.received_at, lead_id),
                 )
+                # Soft opt-out: if the reply smells like "not interested /
+                # stop / remove me", auto-add the sender email to the
+                # blocklist so future batches (and follow-ups) skip them
+                # without needing manual intervention. This honours both
+                # the courtesy line we ask Claude to include in drafts
+                # and any unprompted STOP replies.
+                if sentiment == "not_interested" and m.from_email:
+                    sender = m.from_email.strip().lower()
+                    existing = con.execute(
+                        "SELECT 1 FROM blocklist WHERE kind='email' AND value=?",
+                        (sender,),
+                    ).fetchone()
+                    if not existing:
+                        con.execute(
+                            "INSERT INTO blocklist (kind, value, reason, created_at) "
+                            "VALUES ('email', ?, 'auto:reply opt-out', ?)",
+                            (sender, dt.datetime.now().isoformat(timespec="seconds")),
+                        )
+                        _log_event(
+                            con, "auto_blocklist",
+                            lead_id=lead_id,
+                            meta={"email": sender, "trigger": "not_interested_reply"},
+                        )
                 if newly_inserted_id is not None:
                     new_reply_ids_for_drafting.append(
                         (newly_inserted_id, lead_id)

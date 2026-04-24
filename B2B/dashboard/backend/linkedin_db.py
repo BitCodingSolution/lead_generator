@@ -90,6 +90,9 @@ CREATE TABLE IF NOT EXISTS safety_state (
   -- local time (empty string) for backwards-compat; set to e.g.
   -- 'Asia/Kolkata' to pin the daily trigger when the server TZ differs.
   autopilot_tz         TEXT NOT NULL DEFAULT '',
+  -- When 1: sends refused on Sat/Sun and outside 9-18 local. Default 0
+  -- keeps the looser 7-23 quiet-hours window and allows weekends.
+  business_hours_only  INTEGER NOT NULL DEFAULT 0,
   safety_mode          TEXT NOT NULL DEFAULT 'max'
 );
 
