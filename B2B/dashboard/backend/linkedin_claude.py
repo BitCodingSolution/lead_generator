@@ -159,10 +159,19 @@ def _system_prompt() -> str:
         "multi-dev team ask, CTO/Founder describing full product build, or "
         "explicit \"looking for agency/consultancy\".\n\n"
         "STEP 2 — DRAFT RULES (hard, enforced):\n"
-        "- Plain text only. No HTML, no markdown.\n"
-        "- NEVER use em-dashes or en-dashes. Use regular hyphens or periods.\n"
-        "- No AI tone (\"I hope this finds you well\", \"I am writing to\", "
-        "\"I wanted to reach out\"). Sound like a real person typed it.\n"
+        "- Plain text only. No HTML, no markdown, no bullet/numbered "
+        "lists. Plain paragraphs separated by single blank lines.\n"
+        "- ASCII only in the body. NEVER use em-dash (—) or en-dash (–) — "
+        "use a regular hyphen or a period or a comma. NEVER use smart/"
+        "curly quotes — straight \" and ' only. No bullet symbols "
+        "(• ◦ ‣). No ellipsis character (use three dots if you must). "
+        "No emoji.\n"
+        "- Simple, plain English. Words a non-native reader follows on "
+        "first pass. No corporate vocabulary (\"leverage\", \"synergy\", "
+        "\"streamline\", \"reach out\", \"touch base\", \"circle back\", "
+        "\"value-add\", \"empower\"). No AI tone (\"I hope this finds you "
+        "well\", \"I am writing to\", \"I wanted to reach out\"). Sound "
+        "like a real person sitting in their Gmail typing it themselves.\n"
         "- 60-90 words in the body including the sign-off. The P.S. opt-out "
         "line (see below) does NOT count toward this budget.\n"
         "- Minimal signature: \"Best,\\nJaydip\" (individual) or "
@@ -222,8 +231,30 @@ def _parse_json(raw: str) -> dict:
 
 
 def _strip_dashes(s: str) -> str:
-    """Enforce the em/en-dash ban from feedback memory."""
-    return (s or "").replace("\u2014", "-").replace("\u2013", "-")
+    """Normalise typographic characters that signal AI / auto-typeset
+    output. Cold and reply email both run through this on the way out, so
+    even if Claude slips a smart quote or em-dash into the body it never
+    reaches the recipient.
+
+    Keep additions narrow \u2014 only characters that look obviously
+    non-human-typed in a plain Gmail reply box."""
+    if not s:
+        return ""
+    return (s
+            # em-dash / en-dash \u2192 ascii hyphen
+            .replace("\u2014", "-").replace("\u2013", "-")
+            # smart double quotes \u2192 straight
+            .replace("\u201c", '"').replace("\u201d", '"')
+            # smart single quotes / apostrophes \u2192 straight
+            .replace("\u2018", "'").replace("\u2019", "'")
+            # ellipsis \u2192 three dots
+            .replace("\u2026", "...")
+            # bullet glyphs that creep into "professional" lists
+            .replace("\u2022", "-").replace("\u25e6", "-").replace("\u2023", "-")
+            # non-breaking space \u2192 regular space (Gmail renders both same,
+            # but copy-paste from Word docs is a giveaway)
+            .replace("\xa0", " ")
+            )
 
 
 # --- public entrypoint -----------------------------------------------------
@@ -291,21 +322,37 @@ _REPLY_SYSTEM_PROMPT = (
     "from B2B prospects. The agency (BitCoding Solutions, Surat India) sent "
     "a cold outreach; a prospect replied. Craft a warm, specific reply that "
     "moves the conversation forward.\n\n"
+    "WRITE LIKE A REAL HUMAN TYPING IN THEIR GMAIL REPLY BOX. The reader "
+    "should feel like Jaydip himself sat down for two minutes and typed "
+    "this — not like a tool generated it.\n\n"
     "Hard rules:\n"
-    "- 60-120 words MAX.\n"
-    "- Plain text. No em-dashes (use hyphen). No AI-sounding phrases "
-    "(\"I'd love to\", \"that sounds great\"). Write like a senior dev, not a "
-    "marketer.\n"
-    "- Reference something specific from their reply, don't give a generic "
-    "acknowledgement.\n"
+    "- 60-120 words MAX. Short sentences. Real conversation rhythm.\n"
+    "- Simple, plain English. Words a non-native English reader would "
+    "follow on first pass. No corporate vocabulary (\"leverage\", "
+    "\"synergy\", \"streamline\", \"reach out\", \"touch base\", \"circle "
+    "back\", \"value-add\"). No vague hedging (\"I'd love to\", \"that "
+    "sounds great\", \"happy to learn more\").\n"
+    "- ASCII characters only in the body. NEVER use em-dash (—) or "
+    "en-dash (–) — use a regular hyphen or a period or a comma. NEVER use "
+    "smart/curly quotes — straight \" and ' only. No bullet symbols "
+    "(• ◦ ‣). No ellipsis character — three dots if you must.\n"
+    "- No emoji. No ALL CAPS. No exclamation marks. At most one question "
+    "mark.\n"
+    "- No markdown. No bold. No bullet/numbered lists. Plain paragraphs "
+    "separated by single blank lines.\n"
+    "- Reference something specific from their reply — don't give a "
+    "generic acknowledgement.\n"
     "- If they asked a question, answer it concretely. If they asked for "
-    "specifics (rate, availability, samples), give them or commit to a next "
-    "step.\n"
-    "- End with one low-friction next step (e.g., 'free for a 20-min call "
-    "Tue/Wed?', 'happy to share the case study, just reply with yes').\n"
-    "- Minimal signature: just 'Jaydip' — no company name / phone / taglines.\n"
-    "- Output ONLY the reply body text. No subject line, no greeting boilerplate "
-    "beyond 'Hi <firstname>,' (or '<firstname>,' is fine).\n"
+    "specifics (rate, availability, samples), give them or commit to a "
+    "next step.\n"
+    "- End with one low-friction next step (e.g., 'free for a 20-min "
+    "call Tue/Wed?', 'happy to share the case study, just reply with "
+    "yes').\n"
+    "- Minimal signature: just 'Jaydip' on its own line. No company name, "
+    "no phone, no tagline, no \"Best regards\" — just the name.\n"
+    "- Output ONLY the reply body text. No subject line, no quoted "
+    "history, no greeting boilerplate beyond 'Hi <firstname>,' (or "
+    "'<firstname>,' is fine).\n"
 )
 
 
