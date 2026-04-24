@@ -3,7 +3,7 @@
 import * as React from "react"
 import useSWR, { mutate } from "swr"
 import {
-  Shield, Zap, AlertTriangle, Power, Loader2, Check,
+  Shield, Zap, AlertTriangle, Power, Loader2, Check, Clock,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { api, swrFetcher } from "@/lib/api"
@@ -64,6 +64,43 @@ export function LinkedInSafetyCard() {
         <Row label="Last send" value={fmtRelative(data?.last_send_at)} />
         <Row label="Failures" value={`${data?.consecutive_failures ?? 0}`} />
         <Row label="Mode" value={mode === "max" ? "Maximum safety" : "Normal"} />
+      </div>
+
+      <div className="mt-4 pt-3 border-t border-zinc-800/70">
+        <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center gap-2">
+            <Clock
+              className={cn(
+                "size-4",
+                data?.business_hours_only ? "text-sky-300" : "text-zinc-500",
+              )}
+            />
+            <div>
+              <div className="text-sm font-medium text-zinc-200">
+                Business hours only
+              </div>
+              <div className="text-[11px] text-zinc-500">
+                {data?.business_hours_only
+                  ? "Mon-Fri 09:00-18:00 local"
+                  : "Quiet hours 23:00-07:00 (default)"}
+              </div>
+            </div>
+          </div>
+          <button
+            onClick={() =>
+              patch({ business_hours_only: !data?.business_hours_only })
+            }
+            disabled={busy}
+            className={cn(
+              "inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium",
+              data?.business_hours_only
+                ? "bg-sky-500/15 text-sky-300"
+                : "bg-zinc-700/40 text-zinc-400",
+            )}
+          >
+            {data?.business_hours_only ? "ON" : "OFF"}
+          </button>
+        </div>
       </div>
 
       <div className="mt-4 pt-3 border-t border-zinc-800/70">

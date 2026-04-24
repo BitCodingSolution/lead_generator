@@ -205,6 +205,8 @@ export type LinkedInSafety = {
   warning_paused_until: string | null
   autopilot_enabled: boolean
   autopilot_hour: number
+  autopilot_tz: string
+  business_hours_only: boolean
   safety_mode: "max" | "normal"
 }
 
