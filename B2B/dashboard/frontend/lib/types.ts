@@ -143,6 +143,7 @@ export type LinkedInLead = {
   tech_stack: string | null
   location: string | null
   email: string | null
+  phone: string | null
   status:
     | "New"
     | "Drafted"
@@ -159,6 +160,17 @@ export type LinkedInLead = {
   sent_at: string | null
   replied_at: string | null
   needs_attention: 0 | 1
+  call_status: "green" | "yellow" | "red" | null
+  reviewed_at: string | null
+  jaydip_note: string | null
+  open_count: number
+  first_opened_at: string | null
+  last_opened_at: string | null
+  scheduled_send_at: string | null
+  ooo_nudge_at: string | null
+  ooo_nudge_sent_at: string | null
+  fit_score: number | null
+  fit_score_reasons: string | null
 }
 
 export type LinkedInLeadsResponse = {

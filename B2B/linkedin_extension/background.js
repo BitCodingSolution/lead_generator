@@ -68,6 +68,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  if (msg && msg.type === "PATCH_LEAD") {
+    handlePatchLead(msg.leadId, msg.updates || {})
+      .then((r) => sendResponse({ ok: true, ...r }))
+      .catch((err) => sendResponse({ ok: false, error: err.message }));
+    return true;
+  }
+
   if (msg && msg.type === "WARNING_DETECTED") {
     recordAccountWarning(msg.phrase || "unknown", sender)
       .then(() => sendResponse({ ok: true }))
@@ -330,7 +337,7 @@ async function recordAccountWarning(phrase, sender) {
   try {
     const key = await getDashboardKey();
     if (!key) return;
-    await fetch(DASHBOARD_WARNING, {
+    await fetch(await getDashboardEndpoint("/api/linkedin/account-warning"), {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -1182,10 +1189,18 @@ function parseExtractedJson(raw) {
 // The extension's local features (DM reply generator, post drafter,
 // Claude calls, safety rails) are unchanged — they don't touch the sheet.
 
-const DASHBOARD_BASE = "http://localhost:8900";
-const DASHBOARD_INGEST = `${DASHBOARD_BASE}/api/linkedin/ingest`;
-const DASHBOARD_OVERVIEW = `${DASHBOARD_BASE}/api/linkedin/overview`;
-const DASHBOARD_WARNING = `${DASHBOARD_BASE}/api/linkedin/account-warning`;
+const DEFAULT_DASHBOARD_BASE = "http://localhost:8900";
+
+async function getDashboardBase() {
+  const { dashboardBaseUrl } = await chrome.storage.local.get("dashboardBaseUrl");
+  const raw = String(dashboardBaseUrl || "").trim().replace(/\/$/, "");
+  return raw || DEFAULT_DASHBOARD_BASE;
+}
+
+async function getDashboardEndpoint(path) {
+  const base = await getDashboardBase();
+  return `${base}${path}`;
+}
 
 async function getDashboardKey() {
   const { dashboardApiKey, sheetWebhookUrl } = await chrome.storage.local.get([
@@ -1245,9 +1260,10 @@ async function handleSaveToSheet(payload, _force) {
     skip_reason: payload.skip_reason   || null,
   };
 
+  const base = await getDashboardBase();
   let res;
   try {
-    res = await fetch(DASHBOARD_INGEST, {
+    res = await fetch(`${base}/api/linkedin/ingest`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -1256,7 +1272,7 @@ async function handleSaveToSheet(payload, _force) {
       body: JSON.stringify({ leads: [lead] }),
     });
   } catch (err) {
-    throw new Error(`Could not reach dashboard at ${DASHBOARD_BASE}: ${err.message}`);
+    throw new Error(`Could not reach dashboard at ${base}: ${err.message}`);
   }
 
   const bodyText = await res.text();
@@ -1300,20 +1316,44 @@ async function handleSaveToSheet(payload, _force) {
     sheet: "leads",
     inserted: data.inserted || 0,
     updated: data.updated || 0,
+    // Extension sidebar uses lead_id to drive post-save actions (call
+    // status toggle etc.). First item = the single lead we posted.
+    leadId: (data.items && data.items[0] && data.items[0].lead_id) || null,
   };
+}
+
+
+async function handlePatchLead(leadId, updates) {
+  const key = await getDashboardKey();
+  if (!key) throw new Error("Dashboard API key not set.");
+  const base = await getDashboardBase();
+  const res = await fetch(`${base}/api/linkedin/leads/${leadId}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Ext-Key": key,
+    },
+    body: JSON.stringify(updates),
+  });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`Dashboard HTTP ${res.status}: ${txt.slice(0, 200)}`);
+  }
+  return await res.json().catch(() => ({}));
 }
 
 async function handleTestSheet() {
   const key = await getDashboardKey();
   if (!key) throw new Error("Dashboard API key not set.");
+  const base = await getDashboardBase();
   let res;
   try {
-    res = await fetch(DASHBOARD_OVERVIEW, {
+    res = await fetch(`${base}/api/linkedin/overview`, {
       method: "GET",
       headers: { "X-Ext-Key": key },
     });
   } catch (err) {
-    throw new Error(`Unreachable dashboard at ${DASHBOARD_BASE}: ${err.message}`);
+    throw new Error(`Unreachable dashboard at ${base}: ${err.message}`);
   }
 
   const bodyText = await res.text();

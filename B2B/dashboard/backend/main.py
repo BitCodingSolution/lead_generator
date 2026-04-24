@@ -65,6 +65,28 @@ register_source(Source(
 
 app.include_router(sources_router)
 
+# ---- Verbose validation-error logging so we can debug extension payloads.
+from fastapi import Request  # noqa: E402
+from fastapi.exceptions import RequestValidationError  # noqa: E402
+from fastapi.responses import JSONResponse  # noqa: E402
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_logger(request: Request, exc: RequestValidationError):
+    try:
+        body_preview = (await request.body())[:800]
+    except Exception:
+        body_preview = b""
+    print(
+        f"[422] {request.method} {request.url.path} errors={exc.errors()}\n"
+        f"      body={body_preview!r}"
+    )
+    return JSONResponse(
+        status_code=422,
+        content={"detail": exc.errors()},
+    )
+
+
 # ---- LinkedIn source (separate section — not part of /sources registry) ----
 from linkedin_api import router as linkedin_router  # noqa: E402
 from linkedin_extras import router as linkedin_extras_router, reset_orphans as _reset_orphans  # noqa: E402
@@ -75,11 +97,19 @@ app.include_router(linkedin_extras_router)
 
 @app.on_event("startup")
 def _linkedin_startup_cleanup():
-    """Any leads stuck mid-send before last shutdown — revert to Drafted."""
+    """Any leads stuck mid-send before last shutdown — revert to Drafted.
+    Also reconcile per-account Gmail counters from today's lead rows so the
+    UI reflects actual usage after migrations or mid-day restarts."""
     try:
         _reset_orphans()
     except Exception as e:
         print(f"[linkedin] startup orphan reset failed: {e}")
+    try:
+        from linkedin_gmail import reconcile_today_counts
+        info = reconcile_today_counts()
+        print(f"[linkedin] gmail account counters reconciled: {info}")
+    except Exception as e:
+        print(f"[linkedin] account counter reconcile failed: {e}")
 
 
 # ---- Source action endpoints (scrape / enrich / export-batch) ----
@@ -1202,15 +1232,17 @@ def _start_scheduler():
 
 
 def _linkedin_poll_loop():
-    """Every 60s, run the autopilot tick (cheap check). Every 5th iteration
-    (~5 min), poll Gmail INBOX for replies/bounces if Gmail is connected."""
+    """Every 60s: (1) autopilot tick, (2) scheduled-send tick. Every 5th
+    iteration (~5 min), poll Gmail INBOX for replies/bounces if Gmail is
+    connected."""
     import time as _time
-    from linkedin_api import _poll_and_store, _autopilot_tick
+    from linkedin_api import _poll_and_store, _autopilot_tick, _scheduler_tick
     from linkedin_gmail import get_credentials as _gmail_creds
     tick = 0
     while True:
         try:
             _autopilot_tick()
+            _scheduler_tick()
             if tick % 5 == 0 and _gmail_creds() is not None:
                 _poll_and_store()
         except Exception as e:
@@ -1613,6 +1645,76 @@ class RunPipelineBody(BaseModel):
     no_jitter: bool = False
 
 
+OUTLOOK_ACCOUNT = "pradip@bitcodingsolutions.com"
+
+
+def _check_outlook() -> tuple[bool, bool, Optional[str]]:
+    """Return (outlook_running, account_present, error).
+
+    Uses a cheap COM dispatch; if Outlook isn't running it auto-starts, so we
+    only call this once per preflight request. The account check is the real
+    gate — without it write_to_outlook.py fails mid-pipeline.
+    """
+    try:
+        import win32com.client
+        outlook = win32com.client.Dispatch("Outlook.Application")
+        accounts = [a.SmtpAddress.lower() for a in outlook.Session.Accounts]
+        return True, OUTLOOK_ACCOUNT.lower() in accounts, None
+    except Exception as e:
+        return False, False, str(e)[:200]
+
+
+@app.post("/api/actions/backup-db")
+def backup_db():
+    """Trigger a timestamped SQLite backup of leads.db.
+
+    Delegates to scripts/backup_db.py so the same code path is used by
+    Windows Task Scheduler + manual UI trigger.
+    """
+    argv = [PY, str(SCRIPTS / "backup_db.py")]
+    return {"job_id": start_job(argv, "Backup leads.db")}
+
+
+@app.get("/api/actions/preflight")
+def preflight():
+    """Verify all external dependencies before a pipeline run.
+
+    Returns a structured report; the UI blocks Run Pipeline when any gate
+    fails. Prevents half-consumed state (leads marked 'Picked' even though
+    Outlook/Bridge are down).
+    """
+    checks: list[dict] = []
+
+    # DB reachable
+    db_ok = True
+    try:
+        q_one("SELECT 1")
+    except Exception as e:
+        db_ok = False
+        checks.append({"key": "db", "ok": False, "error": str(e)[:200]})
+    else:
+        checks.append({"key": "db", "ok": True})
+
+    # Bridge
+    bridge_ok = _ping_bridge(timeout=1.0)
+    checks.append({"key": "bridge", "ok": bridge_ok,
+                   "error": None if bridge_ok else "Bridge not responding on :8765"})
+
+    # Outlook + account
+    outlook_ok, account_ok, err = _check_outlook()
+    checks.append({"key": "outlook",
+                   "ok": outlook_ok,
+                   "error": None if outlook_ok else (err or "Outlook COM dispatch failed")})
+    checks.append({
+        "key": "outlook_account",
+        "ok": account_ok,
+        "error": None if account_ok else f"{OUTLOOK_ACCOUNT} not configured in Outlook Desktop",
+    })
+
+    all_ok = all(c["ok"] for c in checks)
+    return {"ok": all_ok, "checks": checks}
+
+
 @app.post("/api/actions/run-pipeline")
 def run_pipeline(body: RunPipelineBody):
     """Orchestrate the whole flow in one job: pick -> generate -> Outlook -> (send/schedule/draft)."""
@@ -1623,6 +1725,16 @@ def run_pipeline(body: RunPipelineBody):
     # Concurrency guard: only one pipeline at a time
     if _pipeline_running():
         raise HTTPException(409, "Another pipeline is already running")
+    # Pre-flight: block before leads get marked 'Picked' if dependencies are down.
+    # 'draft' mode still needs Bridge (generate) + Outlook (push), skip Outlook
+    # check only when send_mode is... actually all modes need Outlook for the
+    # drafts stage, so check everything every time.
+    pf = preflight()
+    if not pf["ok"]:
+        reasons = [c["error"] for c in pf["checks"] if not c["ok"] and c.get("error")]
+        raise HTTPException(
+            503, "Pre-flight failed: " + "; ".join(reasons) if reasons else "Pre-flight failed",
+        )
     # Server-side quota enforcement for 'now' mode (schedule/draft don't send today)
     if body.send_mode == "now":
         today = dt.date.today().isoformat()
@@ -1736,7 +1848,13 @@ def send_all_drafts(body: SendAllDraftsBody):
 
 @app.post("/api/actions/clear-drafts")
 def clear_drafts():
-    """Delete all pending drafts from Outlook + reset DB state."""
+    """Delete ONLY pipeline-owned pending drafts from Outlook + reset DB state.
+
+    Previously this iterated the entire Drafts folder and deleted everything,
+    which wiped unrelated personal/manual drafts in the same account. Now we
+    look up each outlook_entry_id recorded by write_to_outlook.py and delete
+    only those items. Anything not tracked by our DB stays put.
+    """
     import win32com.client
     outlook = win32com.client.Dispatch("Outlook.Application")
     acc = None
@@ -1745,28 +1863,64 @@ def clear_drafts():
             acc = a; break
     if not acc:
         raise HTTPException(500, "pradip@ account not found in Outlook")
-    folder = acc.DeliveryStore.GetDefaultFolder(16)
+
+    # Collect entry IDs of pipeline drafts still pending
+    pending = q_all(
+        "SELECT id, lead_id, outlook_entry_id FROM emails_sent "
+        "WHERE sent_at IS NULL AND outlook_entry_id IS NOT NULL AND outlook_entry_id != ''"
+    )
+    ns = outlook.GetNamespace("MAPI")
+
     deleted = 0
-    for it in list(folder.Items):
+    missing = 0
+    for row in pending:
+        eid = row["outlook_entry_id"]
         try:
-            it.Delete(); deleted += 1
+            item = ns.GetItemFromID(eid)
+            # Extra safety: only delete if it's still an unsent MailItem draft
+            if not getattr(item, "Sent", True):
+                item.Delete()
+                deleted += 1
+            else:
+                missing += 1  # already sent/moved — nothing to delete
         except Exception:
-            pass
+            missing += 1  # item no longer exists in Outlook (user may have deleted manually)
+
     c = conn()
     try:
-        reset_db = c.execute(
-            "DELETE FROM emails_sent WHERE sent_at IS NULL"
-        ).rowcount
-        reset_status = c.execute(
-            "UPDATE lead_status SET status='New', touch_count=0, first_sent_at=NULL, "
-            "last_touch_date=NULL, updated_at=CURRENT_TIMESTAMP "
-            "WHERE status IN ('Picked','Drafted','DraftedInOutlook')"
-        ).rowcount
+        # Drop DB rows only for entry IDs we just handled, so we never orphan
+        # rows that point at live drafts we chose not to touch.
+        ids = [row["id"] for row in pending]
+        if ids:
+            ph = ",".join("?" * len(ids))
+            reset_db = c.execute(
+                f"DELETE FROM emails_sent WHERE id IN ({ph})", ids
+            ).rowcount
+        else:
+            reset_db = 0
+        # Reset lead_status only for leads that had a pending draft cleared
+        lead_ids = [row["lead_id"] for row in pending]
+        if lead_ids:
+            ph = ",".join("?" * len(lead_ids))
+            reset_status = c.execute(
+                f"UPDATE lead_status SET status='New', touch_count=0, "
+                f"first_sent_at=NULL, last_touch_date=NULL, "
+                f"updated_at=CURRENT_TIMESTAMP "
+                f"WHERE lead_id IN ({ph}) AND status IN "
+                f"('Picked','Drafted','DraftedInOutlook')",
+                lead_ids,
+            ).rowcount
+        else:
+            reset_status = 0
         c.commit()
     finally:
         c.close()
-    return {"deleted_outlook": deleted, "reset_db_rows": reset_db,
-            "reset_lead_status": reset_status}
+    return {
+        "deleted_outlook": deleted,
+        "missing_in_outlook": missing,
+        "reset_db_rows": reset_db,
+        "reset_lead_status": reset_status,
+    }
 
 
 @app.get("/api/schedule")

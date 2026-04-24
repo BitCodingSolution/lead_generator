@@ -1,6 +1,7 @@
 "use client"
 
 import * as React from "react"
+import { useSearchParams } from "next/navigation"
 import useSWR from "swr"
 import { toast } from "sonner"
 import { api, swrFetcher } from "@/lib/api"
@@ -30,8 +31,20 @@ const FILTERS: { key: string; label: string }[] = [
   { key: "bounce", label: "Bounce" },
 ]
 
+const VALID_FILTERS = FILTERS.map((f) => f.key)
+
 export default function RepliesPage() {
-  const [filter, setFilter] = React.useState<string>("hot")
+  const searchParams = useSearchParams()
+  const urlFilter = (searchParams?.get("filter") ?? "").toLowerCase()
+  const [filter, setFilter] = React.useState<string>(
+    VALID_FILTERS.includes(urlFilter) ? urlFilter : "hot",
+  )
+  React.useEffect(() => {
+    if (VALID_FILTERS.includes(urlFilter) && urlFilter !== filter) {
+      setFilter(urlFilter)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [urlFilter])
   const [openId, setOpenId] = React.useState<number | null>(null)
 
   const { data, mutate, isLoading } = useSWR<HotLead[]>(

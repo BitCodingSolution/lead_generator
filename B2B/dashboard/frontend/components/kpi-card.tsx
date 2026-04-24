@@ -1,5 +1,6 @@
 "use client"
 
+import Link from "next/link"
 import { motion } from "framer-motion"
 import { cn, fmt } from "@/lib/utils"
 
@@ -12,6 +13,7 @@ type Props = {
   icon?: React.ReactNode
   loading?: boolean
   index?: number
+  href?: string
 }
 
 const ACCENTS: Record<NonNullable<Props["accent"]>, string> = {
@@ -32,13 +34,20 @@ export function KpiCard({
   icon,
   loading,
   index = 0,
+  href,
 }: Props) {
+  const Root = href ? motion(Link) : motion.div
+  const rootProps = href ? ({ href } as { href: string }) : {}
   return (
-    <motion.div
+    <Root
+      {...rootProps}
       initial={{ opacity: 0, y: 6 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.2, delay: index * 0.03, ease: "easeOut" }}
-      className="relative overflow-hidden rounded-xl border border-zinc-800/80 bg-[#18181b] hover:border-zinc-700/90 transition-colors group"
+      className={cn(
+        "relative overflow-hidden rounded-xl border border-zinc-800/80 bg-[#18181b] hover:border-zinc-700/90 transition-colors group",
+        href && "cursor-pointer hover:bg-[#1d1d22]",
+      )}
     >
       <div
         className={cn(
@@ -82,6 +91,6 @@ export function KpiCard({
 
         {hint && <div className="mt-1.5 text-xs text-zinc-500">{hint}</div>}
       </div>
-    </motion.div>
+    </Root>
   )
 }

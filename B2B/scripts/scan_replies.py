@@ -83,9 +83,23 @@ def main():
         return
 
     email_map = {r['to_email'].lower(): r for r in sent}
-    # Also match by normalized subject (strip "Re: ", "AW: ")
+    # Also match by normalized subject (strip "Re:", "AW:", and common bounce-NDR prefixes).
+    # Without bounce-prefix stripping, an NDR like "Unzustellbar: Kurze Frage" never
+    # matches its original "Kurze Frage" via subj_map, so the bounce slips through
+    # and the email stays in the sending pool.
+    _PREFIX_RE = re.compile(
+        r'^(re|aw|fwd|wg|undeliverable|unzustellbar|nicht zugestellt|returned mail|delivery status notification|mail delivery failed|automatic reply):\s*',
+        flags=re.I,
+    )
     def norm_subj(s):
-        return re.sub(r'^(re:|aw:|fwd:|wg:)\s*', '', (s or '').strip(), flags=re.I).lower()
+        s = (s or '').strip()
+        # Strip repeatedly so "Unzustellbar: Re: Hello" collapses to "hello"
+        for _ in range(3):
+            m = _PREFIX_RE.match(s)
+            if not m:
+                break
+            s = s[m.end():]
+        return s.lower()
 
     subj_map = {}
     for r in sent:
@@ -143,8 +157,24 @@ def main():
             body = item.Body or ''
             snippet = body[:200].replace('\n', ' ')
 
-            # Detect mailer-daemon style bounces by sender pattern
-            sent_auto = any(x in sender for x in ['mailer-daemon', 'postmaster', 'mail-daemon'])
+            # Deterministic bounce detection — cheaper + more reliable than a
+            # Claude call. Catches both daemon-sourced NDRs and bounces that
+            # arrive from the target MX with a normal-looking From header.
+            subj_lower = (item.Subject or '').lower()
+            body_lower = body.lower()
+            sent_auto = (
+                any(x in sender for x in ('mailer-daemon', 'postmaster', 'mail-daemon'))
+                or any(x in subj_lower for x in (
+                    'undeliverable', 'unzustellbar', 'nicht zugestellt',
+                    'delivery status notification', 'mail delivery failed',
+                    'returned mail',
+                ))
+                or any(x in body_lower for x in (
+                    'address not found', 'user unknown',
+                    'mailbox does not exist', 'no such user',
+                    'recipient address rejected',
+                ))
+            )
             sentiment = 'Bounce' if sent_auto else classify(item.Subject, body)
 
             con.execute(

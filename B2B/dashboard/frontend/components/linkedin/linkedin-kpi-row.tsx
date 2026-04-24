@@ -19,6 +19,7 @@ export function LinkedInKpiRow() {
     icon: React.ReactNode
     accent?: "violet" | "emerald" | "amber" | "rose" | "sky"
     hint?: string
+    href?: string
   }[] = [
     {
       label: "Total leads",
@@ -26,6 +27,7 @@ export function LinkedInKpiRow() {
       icon: <Inbox className="size-4" />,
       accent: "violet",
       hint: "All LinkedIn rows",
+      href: "/linkedin/leads?tab=all",
     },
     {
       label: "Drafted",
@@ -33,6 +35,7 @@ export function LinkedInKpiRow() {
       icon: <Mail className="size-4" />,
       accent: "sky",
       hint: "Ready to send",
+      href: "/linkedin/leads?tab=drafts",
     },
     {
       label: "Sent today",
@@ -40,18 +43,22 @@ export function LinkedInKpiRow() {
       icon: <Send className="size-4" />,
       accent: "emerald",
       hint: `of ${data?.quota_cap ?? 20} daily cap`,
+      href: "/linkedin/leads?tab=sent",
     },
     {
       label: "Replied",
       value: data?.replied,
       icon: <MessageSquareReply className="size-4" />,
       accent: "amber",
+      href: "/linkedin/replies",
     },
     {
       label: "Bounced",
       value: data?.bounced,
       icon: <Ban className="size-4" />,
       accent: "rose",
+      // Bounced leads live within Sent & Replies; filter via status
+      href: "/linkedin/leads?tab=all&status=Bounced",
     },
     {
       label: "Queued",
@@ -59,6 +66,7 @@ export function LinkedInKpiRow() {
       icon: <Sparkles className="size-4" />,
       accent: "violet",
       hint: "Waiting in send queue",
+      href: "/linkedin/leads?tab=all&status=Queued",
     },
   ]
 
@@ -74,6 +82,7 @@ export function LinkedInKpiRow() {
           accent={c.accent}
           loading={isLoading}
           index={i}
+          href={c.href}
         />
       ))}
     </div>

@@ -1,6 +1,7 @@
 "use client"
 
 import * as React from "react"
+import { useSearchParams } from "next/navigation"
 import useSWR from "swr"
 import { swrFetcher } from "@/lib/api"
 import type { Lead, LeadsResponse, LeadDetail, IndustryRow } from "@/lib/types"
@@ -30,7 +31,17 @@ const STATUSES = ["new", "picked", "drafted", "sent", "replied"]
 const TIERS = ["1", "2"]
 
 export default function LeadsPage() {
-  const [status, setStatus] = React.useState<string>("")
+  const searchParams = useSearchParams()
+  const urlStatus = (searchParams?.get("status") ?? "").toLowerCase()
+  const [status, setStatus] = React.useState<string>(
+    STATUSES.includes(urlStatus) ? urlStatus : "",
+  )
+  React.useEffect(() => {
+    if (STATUSES.includes(urlStatus) && urlStatus !== status) {
+      setStatus(urlStatus)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [urlStatus])
   const [industry, setIndustry] = React.useState<string>("")
   const [tier, setTier] = React.useState<string>("")
   const [searchRaw, setSearchRaw] = React.useState<string>("")

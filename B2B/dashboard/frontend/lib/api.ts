@@ -33,6 +33,14 @@ export const api = {
     })
     return handle(res) as Promise<T>
   },
+  delete: async <T = unknown>(path: string): Promise<T> => {
+    const res = await fetch(`${BASE}${path}`, {
+      method: "DELETE",
+      cache: "no-store",
+      headers: { Accept: "application/json" },
+    })
+    return handle(res) as Promise<T>
+  },
 }
 
 // Cast to `any` so `useSWR<T>(key, swrFetcher)` infers the right data type

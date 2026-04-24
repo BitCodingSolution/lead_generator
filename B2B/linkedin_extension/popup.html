@@ -55,10 +55,13 @@
           <button id="scanSaveAllBtn" disabled title="Save every unsaved lead to the LinkedIn sheet">💾 Save all</button>
           <button id="scanClearBtn" disabled>🧹 Clear</button>
         </div>
-        <label class="scan-toggle">
-          <input type="checkbox" id="scanAutoGenEmail" checked />
-          <span>📧 Auto-generate email on save <em>(Claude — ~10 sec per lead)</em></span>
+        <label class="scan-toggle" style="display:none">
+          <input type="checkbox" id="scanAutoGenEmail" />
+          <span>📧 Auto-generate email on save</span>
         </label>
+        <div class="scan-hint" style="font-size:11px;color:#6b6b7a;margin:2px 0 6px;">
+          ⚡ Scrape-only. Drafts generate on the dashboard (parallel, much faster).
+        </div>
 
         <div id="scanProgress" class="scan-progress" style="display:none">
           <div class="scan-progress-head">
@@ -260,6 +263,22 @@
             type="password"
             id="sheetWebhookInput"
             placeholder="li_xxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+            autocomplete="off"
+          />
+        </div>
+
+        <div class="sheet-field">
+          <div class="sheet-field-head">
+            <div class="sheet-field-titles">
+              <span class="sheet-field-title">🌐 Backend API base</span>
+              <span class="sheet-field-desc">Where ingest/overview POST go. Default <code>http://localhost:8900</code>. Change when using a tunnel / production URL.</span>
+            </div>
+            <span id="dashboardBaseBadge" class="sheet-badge sheet-badge-muted">default</span>
+          </div>
+          <input
+            type="text"
+            id="dashboardBaseUrlInput"
+            placeholder="https://api.bitcodingsolutions.com"
             autocomplete="off"
           />
         </div>

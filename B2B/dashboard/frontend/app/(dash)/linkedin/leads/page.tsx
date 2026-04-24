@@ -1,8 +1,9 @@
 "use client"
 
 import * as React from "react"
+import { useSearchParams } from "next/navigation"
 import useSWR, { mutate } from "swr"
-import { Inbox, Mail, Send, Clock, Trash2, Loader2 } from "lucide-react"
+import { Inbox, Mail, Send, Clock, Trash2, Loader2, Sparkles } from "lucide-react"
 import { PageHeader } from "@/components/page-header"
 import { LinkedInLeadsTable } from "@/components/linkedin/linkedin-leads-table"
 import { LinkedInBatchSend } from "@/components/linkedin/linkedin-batch-send"
@@ -13,6 +14,8 @@ import { api, swrFetcher } from "@/lib/api"
 import { cn } from "@/lib/utils"
 
 type Tab = "all" | "drafts" | "sent" | "followups" | "recyclebin"
+
+const VALID_TABS: readonly Tab[] = ["all", "drafts", "sent", "followups", "recyclebin"] as const
 
 type Counts = {
   new: number
@@ -25,7 +28,17 @@ type Counts = {
 }
 
 export default function LinkedInLeadsPage() {
-  const [tab, setTab] = React.useState<Tab>("all")
+  const searchParams = useSearchParams()
+  const urlTab = searchParams?.get("tab") as Tab | null
+  const initialTab: Tab = urlTab && VALID_TABS.includes(urlTab) ? urlTab : "all"
+  const [tab, setTab] = React.useState<Tab>(initialTab)
+  // Keep state in sync if user clicks another KPI while on this page
+  React.useEffect(() => {
+    if (urlTab && VALID_TABS.includes(urlTab) && urlTab !== tab) {
+      setTab(urlTab)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [urlTab])
 
   const { data: overview } = useSWR<Counts>("/api/linkedin/overview", swrFetcher, {
     refreshInterval: 15_000,
@@ -105,6 +118,10 @@ export default function LinkedInLeadsPage() {
           </button>
         ))}
       </div>
+
+      {(tab === "all" || tab === "drafts") && (
+        <GenerateDraftsInline newCount={overview?.new ?? 0} />
+      )}
 
       {tab === "drafts" && <LinkedInBatchSend />}
 
@@ -233,6 +250,88 @@ function FollowupsInline() {
             </tbody>
           </table>
         )}
+      </div>
+    </div>
+  )
+}
+
+// ---------- generate drafts inline ----------
+
+type DraftBatchStatus = {
+  running: boolean
+  total: number
+  drafted: number
+  skipped: number
+  failed: number
+  last_error: string | null
+}
+
+function GenerateDraftsInline({ newCount }: { newCount: number }) {
+  const { data: status } = useSWR<DraftBatchStatus>(
+    "/api/linkedin/drafts/generate/status",
+    swrFetcher,
+    { refreshInterval: 2000 },
+  )
+  const [busy, setBusy] = React.useState(false)
+  const [err, setErr] = React.useState<string | null>(null)
+
+  const running = status?.running ?? false
+  const done = (status?.drafted ?? 0) + (status?.skipped ?? 0) + (status?.failed ?? 0)
+  const total = status?.total ?? 0
+  const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0
+
+  const prevRunning = React.useRef(running)
+  React.useEffect(() => {
+    if (prevRunning.current && !running) {
+      mutate("/api/linkedin/overview")
+      mutate((k) => typeof k === "string" && k.startsWith("/api/linkedin/leads"))
+    }
+    prevRunning.current = running
+  }, [running])
+
+  async function startBatch() {
+    setErr(null)
+    setBusy(true)
+    try {
+      await api.post("/api/linkedin/drafts/generate/batch", { max: 100 })
+      mutate("/api/linkedin/drafts/generate/status")
+    } catch (e) {
+      setErr((e as Error).message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (newCount === 0 && !running) return null
+
+  return (
+    <div className="rounded-xl border border-zinc-800/80 bg-[#18181b] p-3 flex items-center justify-between flex-wrap gap-3">
+      <div className="flex items-center gap-2 text-xs text-zinc-400">
+        <Sparkles className="size-3.5 text-[hsl(250_80%_62%)]" />
+        {running ? (
+          <span>
+            Drafting {done}/{total} · {pct}% · {status?.drafted ?? 0} drafted · {status?.skipped ?? 0} skipped · {status?.failed ?? 0} failed
+          </span>
+        ) : (
+          <span>
+            {newCount} lead{newCount === 1 ? "" : "s"} need drafting. Claude runs 4 in parallel.
+          </span>
+        )}
+      </div>
+      <div className="flex items-center gap-2">
+        {err && <span className="text-[11px] text-rose-400">{err}</span>}
+        <button
+          onClick={startBatch}
+          disabled={busy || running || newCount === 0}
+          className="inline-flex items-center gap-1.5 rounded-md bg-[hsl(250_80%_62%)] px-3 py-1 text-xs font-medium text-white hover:brightness-110 disabled:opacity-50"
+        >
+          {busy || running ? (
+            <Loader2 className="size-3 animate-spin" />
+          ) : (
+            <Sparkles className="size-3" />
+          )}
+          {running ? "Drafting…" : "Generate drafts"}
+        </button>
       </div>
     </div>
   )

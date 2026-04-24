@@ -45,6 +45,8 @@ const saveSheetBtn = document.getElementById("saveSheetBtn");
 const testSheetBtn = document.getElementById("testSheetBtn");
 const sheetStatus = document.getElementById("sheetStatus");
 const sheetViewUrlInput = document.getElementById("sheetViewUrlInput");
+const dashboardBaseUrlInput = document.getElementById("dashboardBaseUrlInput");
+const dashboardBaseBadge = document.getElementById("dashboardBaseBadge");
 // saveSheetViewBtn was removed — the unified "Save config" button now
 // handles both endpoint and open-URL in one save.
 const sheetViewStatus = document.getElementById("sheetViewStatus");
@@ -79,6 +81,7 @@ chrome.storage.local.get(
     "bridgeUrl",
     "sheetWebhookUrl",
     "sheetViewUrl",
+    "dashboardBaseUrl",
     "darkMode",
   ],
   (data) => {
@@ -95,6 +98,13 @@ chrome.storage.local.get(
     if (data.sheetViewUrl) {
       sheetViewUrlInput.value = data.sheetViewUrl;
       sheetViewStatus.textContent = "Saved.";
+    }
+    if (dashboardBaseUrlInput && data.dashboardBaseUrl) {
+      dashboardBaseUrlInput.value = data.dashboardBaseUrl;
+      if (dashboardBaseBadge) {
+        dashboardBaseBadge.textContent = "custom";
+        dashboardBaseBadge.classList.remove("sheet-badge-muted");
+      }
     }
 
     applyTheme(!!data.darkMode);
@@ -550,12 +560,32 @@ saveSheetBtn.addEventListener("click", async () => {
     clearView = true;
   }
 
+  // Backend API base (optional)
+  const baseRaw = (dashboardBaseUrlInput?.value || "").trim().replace(/\/$/, "");
+  let baseToSave = null;
+  let clearBase = false;
+  if (baseRaw) {
+    if (!/^https?:\/\//.test(baseRaw)) {
+      setSheetStatus("Backend API base should start with http:// or https://", true);
+      return;
+    }
+    baseToSave = baseRaw;
+  } else {
+    clearBase = true;
+  }
+
   // Write to storage
   const updates = {};
   if (endpointToSave !== null) updates.sheetWebhookUrl = endpointToSave;
   if (viewToSave !== null) updates.sheetViewUrl = viewToSave;
+  if (baseToSave !== null) updates.dashboardBaseUrl = baseToSave;
   if (Object.keys(updates).length) await chrome.storage.local.set(updates);
   if (clearView && !viewToSave) await chrome.storage.local.remove("sheetViewUrl");
+  if (clearBase && !baseToSave) await chrome.storage.local.remove("dashboardBaseUrl");
+  if (dashboardBaseBadge) {
+    dashboardBaseBadge.textContent = baseToSave ? "custom" : "default";
+    dashboardBaseBadge.classList.toggle("sheet-badge-muted", !baseToSave);
+  }
 
   // Re-mask the endpoint field after save
   if (endpointToSave) {
@@ -1094,6 +1124,13 @@ let scanActiveTabId  = null;   // detected search-results tab id
 // Saved leads tracked by STABLE KEY, not index. Indices shift when a
 // re-scan merges new leads in, so a key-based set survives merges.
 let scanSavedKeys    = new Set();
+// Map stable-lead-key -> dashboard lead id. Populated once the save
+// response comes back; used to fire call-status patches post-save.
+let scanSavedLeadIds = new Map();
+// Map stable-lead-key -> current local call_status pick (green|yellow|red|null).
+// Mirrored in the UI button state and submitted as part of the save payload
+// on first save, or patched via API after save.
+let scanCallStatus   = new Map();
 
 // Stable identity for a lead — survives DOM virtualization + page scrolling.
 // Priority: postUrl > sorted emails > sorted phones > snippet hash. Used
@@ -1165,6 +1202,8 @@ function scanBuildPayload(lead, genFields) {
   // filtered / distinguished from manually-pasted leads. Status defaults
   // to 'New' so they're immediately eligible for batch send (subject to
   // Apps Script's phrase + job-post-signal filters).
+  const cardKey = scanLeadKey(lead);
+  const preTagged = scanCallStatus.get(cardKey) || "";
   const base = {
     post_url: lead.postUrl || "",
     posted_by: lead.author || "",
@@ -1173,6 +1212,9 @@ function scanBuildPayload(lead, genFields) {
     post_text: lead.text || "",
     notes: lead.snippet || "",
     tags: lead.hiringSignal ? "bulk-scan, hiring-signal" : "bulk-scan",
+    // 🟢/🟡/🔴 the user marked before hitting Save gets persisted at
+    // insert — no race with a follow-up PATCH_LEAD call.
+    call_status: preTagged || undefined,
   };
 
   if (!genFields) return base;
@@ -1435,6 +1477,28 @@ function scanRenderLeads(leads) {
       actions.appendChild(openBtn);
     }
 
+    // Call-status quick-mark row. Works both pre-save (buffers the
+    // choice; applied on first save) and post-save (patches lead by id).
+    const tagRow = document.createElement("div");
+    tagRow.className = "scan-lead-tags";
+    const cardKey = scanLeadKey(lead);
+    const current = scanCallStatus.get(cardKey) || "";
+    const defs = [
+      { v: "green",  label: "🟢", title: "Interested" },
+      { v: "yellow", label: "🟡", title: "Maybe" },
+      { v: "red",    label: "🔴", title: "Not a fit" },
+    ];
+    defs.forEach((d) => {
+      const b = document.createElement("button");
+      b.className = "scan-tag-btn" + (current === d.v ? " active" : "");
+      b.textContent = d.label;
+      b.title = d.title;
+      b.dataset.value = d.v;
+      b.addEventListener("click", () => onCallStatusClick(cardKey, d.v, tagRow));
+      tagRow.appendChild(b);
+    });
+    actions.appendChild(tagRow);
+
     card.appendChild(actions);
     scanLeadsWrap.appendChild(card);
   }
@@ -1447,11 +1511,53 @@ function mkBadge(text, cls) {
   return b;
 }
 
+async function onCallStatusClick(cardKey, value, tagRow) {
+  // Toggle: clicking the already-active one clears.
+  const prev = scanCallStatus.get(cardKey) || "";
+  const next = prev === value ? "" : value;
+  if (next) {
+    scanCallStatus.set(cardKey, next);
+  } else {
+    scanCallStatus.delete(cardKey);
+  }
+  // Repaint just this row's buttons.
+  tagRow.querySelectorAll(".scan-tag-btn").forEach((b) => {
+    b.classList.toggle("active", b.dataset.value === next);
+  });
+
+  // If the lead is already saved, patch the dashboard now.
+  const leadId = scanSavedLeadIds.get(cardKey);
+  if (leadId) {
+    try {
+      const resp = await chrome.runtime.sendMessage({
+        type: "PATCH_LEAD",
+        leadId,
+        updates: { call_status: next },
+      });
+      if (resp && resp.ok) {
+        setScanStatus(next ? `Tagged ${labelFor(next)}` : "Tag cleared.");
+      } else {
+        setScanStatus(`Tag failed: ${(resp && resp.error) || "unknown"}`, true);
+      }
+    } catch (err) {
+      setScanStatus(`Tag failed: ${err.message}`, true);
+    }
+  }
+}
+
+function labelFor(v) {
+  if (v === "green")  return "🟢 Interested";
+  if (v === "yellow") return "🟡 Maybe";
+  if (v === "red")    return "🔴 Not a fit";
+  return v;
+}
+
+
 async function scanSaveLead(idx, btn, card) {
   const lead = scanCurrentLeads[idx];
   if (!lead) return;
 
-  let autoGen = !!(scanAutoGenEmail && scanAutoGenEmail.checked);
+  let autoGen = false; // Drafts now generate on the dashboard — extension is scrape-only.
 
   // If the post is truncated (LinkedIn "...see more" clamp), Claude only
   // gets partial context and emails come out generic. Ask the user before
@@ -1523,11 +1629,11 @@ async function scanSaveLead(idx, btn, card) {
         setScanStatus("Forced save failed: " + ((forced && forced.error) || "unknown"), true);
         return;
       }
-      markCardSaved(card, btn, forced.row, forced.autoSkipped, forced.autoSkipReason);
+      markCardSaved(card, btn, forced.row, forced.autoSkipped, forced.autoSkipReason, forced.leadId);
       return;
     }
 
-    markCardSaved(card, btn, resp.row, resp.autoSkipped, resp.autoSkipReason);
+    markCardSaved(card, btn, resp.row, resp.autoSkipped, resp.autoSkipReason, resp.leadId);
   } catch (err) {
     btn.disabled = false;
     btn.textContent = "💾 Save";
@@ -1535,7 +1641,7 @@ async function scanSaveLead(idx, btn, card) {
   }
 }
 
-function markCardSaved(card, btn, row, autoSkipped, autoSkipReason) {
+function markCardSaved(card, btn, row, autoSkipped, autoSkipReason, leadId) {
   card.classList.add("saved");
   if (autoSkipped) {
     // Apps Script auto-classified this row as blocked (full-time / onsite /
@@ -1555,6 +1661,7 @@ function markCardSaved(card, btn, row, autoSkipped, autoSkipReason) {
   const key = card.dataset.key
     || scanLeadKey(scanCurrentLeads[Number(card.dataset.idx)] || null);
   if (key) scanSavedKeys.add(key);
+  if (key && leadId) scanSavedLeadIds.set(key, leadId);
   setScanStatus(
     autoSkipped
       ? `⊘ Saved as Skipped — matched "${autoSkipReason}" (won't email).`
@@ -1696,7 +1803,7 @@ async function scanSaveAll() {
   }
 
   const total = toSave.length;
-  const autoGen = !!(scanAutoGenEmail && scanAutoGenEmail.checked);
+  const autoGen = false; // Extension is scrape-only; dashboard handles Claude drafting.
   let saved = 0;
   let skippedDupe = 0;
   let autoSkipped = 0;   // Apps Script auto-classified as blocked phrase
@@ -1753,7 +1860,7 @@ async function scanSaveAll() {
       if (resp && resp.ok && !resp.duplicate) {
         saved++;
         if (resp.autoSkipped) autoSkipped++;
-        if (card && btn) markCardSaved(card, btn, resp.row, resp.autoSkipped, resp.autoSkipReason);
+        if (card && btn) markCardSaved(card, btn, resp.row, resp.autoSkipped, resp.autoSkipReason, resp.leadId);
       } else if (resp && resp.duplicate) {
         skippedDupe++;
         // Mark as "already saved" — same visual state as a fresh save so

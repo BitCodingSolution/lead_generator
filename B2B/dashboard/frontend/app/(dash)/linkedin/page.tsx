@@ -3,6 +3,7 @@ import { LinkedInKpiRow } from "@/components/linkedin/linkedin-kpi-row"
 import { LinkedInSafetyCard } from "@/components/linkedin/linkedin-safety-card"
 import { LinkedInGmailConnect } from "@/components/linkedin/linkedin-gmail-connect"
 import { LinkedInBatchSend } from "@/components/linkedin/linkedin-batch-send"
+import { LinkedInAutoPausedBanner } from "@/components/linkedin/linkedin-auto-paused-banner"
 
 export default function LinkedInOverviewPage() {
   return (
@@ -11,6 +12,8 @@ export default function LinkedInOverviewPage() {
         title="LinkedIn Outreach"
         subtitle="Scan posts, generate drafts, send via Gmail. All native in the dashboard."
       />
+
+      <LinkedInAutoPausedBanner />
 
       <LinkedInKpiRow />
 

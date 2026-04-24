@@ -9,8 +9,9 @@ import { LinkedInMaintenance } from "@/components/linkedin/linkedin-maintenance"
 import { LinkedInAutopilotStatus } from "@/components/linkedin/linkedin-autopilot-status"
 import { LinkedInBlocklistCard } from "@/components/linkedin/linkedin-blocklist-card"
 import { LinkedInCVsCard } from "@/components/linkedin/linkedin-cvs-card"
-import { Puzzle, Mail, Shield, Ban, FileText, Wrench, KeyRound } from "lucide-react"
+import { Puzzle, Mail, Shield, Ban, FileText, Wrench, KeyRound, Download } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { api } from "@/lib/api"
 
 type SectionId =
   | "gmail" | "safety" | "keys" | "blocklist" | "cvs" | "maintenance" | "install"
@@ -109,20 +110,35 @@ export default function LinkedInSettingsPage() {
 
       <Section id="install" title="Install the Chrome extension">
         <div className="rounded-xl border border-zinc-800/80 bg-[#18181b] p-4">
-          <div className="flex items-center gap-2 mb-2">
-            <Puzzle className="size-4 text-zinc-400" />
-            <div className="text-sm font-medium text-zinc-200">
-              Unpacked install
+          <div className="flex items-center justify-between gap-2 mb-3">
+            <div className="flex items-center gap-2">
+              <Puzzle className="size-4 text-zinc-400" />
+              <div className="text-sm font-medium text-zinc-200">
+                Unpacked install
+              </div>
             </div>
+            <a
+              href={`${api.base}/api/linkedin/extension/download`}
+              download
+              className="inline-flex items-center gap-1.5 rounded-md bg-[hsl(250_80%_62%)] px-3 py-1.5 text-xs font-medium text-white hover:bg-[hsl(250_80%_70%)]"
+            >
+              <Download className="size-3.5" />
+              Download extension (.zip)
+            </a>
           </div>
           <ol className="list-decimal list-inside text-xs text-zinc-400 space-y-1">
+            <li>Download the zip above and extract it somewhere permanent</li>
             <li>Open <span className="font-mono">chrome://extensions</span></li>
-            <li>Enable Developer mode</li>
+            <li>Enable <span className="font-mono">Developer mode</span> (top right)</li>
             <li>
               Click <span className="font-mono">Load unpacked</span> and select
-              <span className="font-mono"> B2B/linkedin_extension</span>
+              the extracted <span className="font-mono">linkedin_extension</span> folder
             </li>
-            <li>Paste your API key into the extension side panel</li>
+            <li>
+              Open the extension popup, paste your API key (from the
+              Extension keys section above) and set the Backend API base
+              to <span className="font-mono">https://api.bitcodingsolutions.com</span>
+            </li>
           </ol>
         </div>
       </Section>

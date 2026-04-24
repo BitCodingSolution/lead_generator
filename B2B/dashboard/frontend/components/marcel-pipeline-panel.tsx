@@ -280,6 +280,26 @@ export function MarcelPipelinePanel() {
 
   async function runPipeline() {
     if (!canRun) return
+    // Pre-flight: verify Bridge/Outlook/DB before leads get marked 'Picked'.
+    // Backend also enforces this, but failing here gives a specific toast
+    // per missing dependency instead of a generic 503.
+    try {
+      const pf = await api.get<{
+        ok: boolean
+        checks: { key: string; ok: boolean; error?: string | null }[]
+      }>("/api/actions/preflight")
+      if (!pf.ok) {
+        const bad = pf.checks.filter((c) => !c.ok)
+        const summary = bad.map((c) => c.error || c.key).join(" · ")
+        toast.error("Pre-flight failed", { description: summary })
+        return
+      }
+    } catch (e) {
+      toast.error("Pre-flight check failed", {
+        description: e instanceof Error ? e.message : String(e),
+      })
+      return
+    }
     try {
       const body: {
         industry: string

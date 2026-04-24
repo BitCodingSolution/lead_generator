@@ -42,6 +42,7 @@ const SECTIONS: NavSection[] = [
     items: [
       { href: "/linkedin", label: "Overview", icon: Briefcase },
       { href: "/linkedin/leads", label: "Leads", icon: Inbox },
+      { href: "/linkedin/replies", label: "Replies", icon: MessageSquareReply },
       { href: "/linkedin/analytics", label: "Analytics", icon: BarChart3 },
       { href: "/linkedin/settings", label: "Settings", icon: Settings },
     ],

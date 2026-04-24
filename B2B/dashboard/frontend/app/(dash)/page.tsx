@@ -100,6 +100,7 @@ export default function OverviewPage() {
           accent="violet"
           loading={statsLoading}
           index={0}
+          href="/leads"
         />
         <KpiCard
           label="Drafted"
@@ -109,6 +110,7 @@ export default function OverviewPage() {
           accent="sky"
           loading={statsLoading}
           index={1}
+          href="/leads?status=drafted"
         />
         <KpiCard
           label="Sent today"
@@ -118,6 +120,7 @@ export default function OverviewPage() {
           accent="violet"
           loading={statsLoading}
           index={2}
+          href="/leads?status=sent"
         />
         <KpiCard
           label="Replies"
@@ -127,6 +130,7 @@ export default function OverviewPage() {
           accent="emerald"
           loading={statsLoading}
           index={3}
+          href="/replies?filter=all"
         />
         <KpiCard
           label="Positive rate"
@@ -136,6 +140,7 @@ export default function OverviewPage() {
           accent="amber"
           loading={statsLoading}
           index={4}
+          href="/replies?filter=positive"
         />
         <KpiCard
           label="Hot pending"
@@ -145,6 +150,7 @@ export default function OverviewPage() {
           accent="rose"
           loading={statsLoading}
           index={5}
+          href="/replies?filter=hot"
         />
       </div>
 

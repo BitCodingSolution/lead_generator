@@ -276,3 +276,119 @@ def _fallback_decision(
         cv_cluster=classify_specialty(haystack),
         raw=f"(bridge unreachable: {bridge_error})",
     )
+
+
+# --- reply drafter ---------------------------------------------------------
+
+
+_REPLY_SYSTEM_PROMPT = (
+    "You help draft short, professional replies to email responses received "
+    "from B2B prospects. The agency (BitCoding Solutions, Surat India) sent "
+    "a cold outreach; a prospect replied. Craft a warm, specific reply that "
+    "moves the conversation forward.\n\n"
+    "Hard rules:\n"
+    "- 60-120 words MAX.\n"
+    "- Plain text. No em-dashes (use hyphen). No AI-sounding phrases "
+    "(\"I'd love to\", \"that sounds great\"). Write like a senior dev, not a "
+    "marketer.\n"
+    "- Reference something specific from their reply, don't give a generic "
+    "acknowledgement.\n"
+    "- If they asked a question, answer it concretely. If they asked for "
+    "specifics (rate, availability, samples), give them or commit to a next "
+    "step.\n"
+    "- End with one low-friction next step (e.g., 'free for a 20-min call "
+    "Tue/Wed?', 'happy to share the case study, just reply with yes').\n"
+    "- Minimal signature: just 'Jaydip' — no company name / phone / taglines.\n"
+    "- Output ONLY the reply body text. No subject line, no greeting boilerplate "
+    "beyond 'Hi <firstname>,' (or '<firstname>,' is fine).\n"
+)
+
+
+def _reply_user_prompt(
+    *, prospect_first_name: str, prospect_reply_text: str,
+    original_subject: str, original_body: str,
+) -> str:
+    parts = [
+        f"Prospect first name: {prospect_first_name or '(unknown)'}",
+        "",
+        "Original outreach I sent:",
+        f"  Subject: {original_subject or '(no subject)'}",
+        "  Body:",
+        (original_body or "(not available)").strip(),
+        "",
+        "Their reply to us:",
+        (prospect_reply_text or "(empty)").strip(),
+        "",
+        "Draft my response now. Output ONLY the reply body — no subject, no "
+        "quoted-text, no signature block beyond a single 'Jaydip' at the end.",
+    ]
+    return "\n".join(parts)
+
+
+# Lightweight regex-based sentiment classifier — runs synchronously during
+# IMAP poll. Doesn't need the Bridge, so works 24/7. Buckets tuned for the
+# 6 most common B2B reply shapes; anything it can't classify stays null and
+# the UI shows a plain badge.
+_SENTIMENT_RULES: list[tuple[str, "re.Pattern"]] = [
+    ("ooo", re.compile(
+        r"\b(out of office|on vacation|currently away|annual leave|"
+        r"on holiday|away from my desk|will be back|limited access "
+        r"to email)\b", re.IGNORECASE)),
+    ("not_interested", re.compile(
+        r"\b(not interested|unsubscribe|please remove|no thanks|"
+        r"not a fit|don'?t contact|stop emailing|take me off your list|"
+        r"we'?re all set|no need at this time|not looking|not hiring)\b",
+        re.IGNORECASE)),
+    ("question", re.compile(
+        r"(\?\s*$)|\b(can you share|could you send|what is your|what's your|"
+        r"how much|how do you|tell me more|more details|send me|"
+        r"availability|your rate|pricing|quote)\b",
+        re.IGNORECASE | re.MULTILINE)),
+    ("positive", re.compile(
+        r"\b(interested|sounds good|let'?s (talk|chat|connect|schedule|"
+        r"set up)|schedule a call|book a call|jump on a call|"
+        r"share (my|your) cv|forward (your|the) (cv|portfolio)|"
+        r"add you to (our|my) network|keep you in (the )?loop|"
+        r"great fit|exactly what|let me know (when|your) availabilit|"
+        r"happy to (hop|connect|chat))\b", re.IGNORECASE)),
+    ("referral", re.compile(
+        r"\b(not me but|ping|forward|passing this to|reach out to|"
+        r"talk to|contact our|my colleague|my team lead|right person)\b",
+        re.IGNORECASE)),
+]
+
+
+def classify_sentiment(text: str) -> Optional[str]:
+    """Return one of: positive | question | ooo | not_interested | referral
+    | None (couldn't confidently classify)."""
+    t = (text or "").strip()
+    if not t:
+        return None
+    # Check in priority order — OOO first so "happy to chat when back" goes OOO.
+    for label, pattern in _SENTIMENT_RULES:
+        if pattern.search(t):
+            return label
+    return None
+
+
+def generate_reply_draft(
+    *, prospect_first_name: str, prospect_reply_text: str,
+    original_subject: str, original_body: str,
+) -> tuple[str, str]:
+    """Returns (body, raw). If Bridge unreachable, body='' and raw has error."""
+    payload = {
+        "system_prompt": _REPLY_SYSTEM_PROMPT,
+        "user_message": _reply_user_prompt(
+            prospect_first_name=prospect_first_name,
+            prospect_reply_text=prospect_reply_text,
+            original_subject=original_subject,
+            original_body=original_body,
+        ),
+    }
+    try:
+        r = requests.post(BRIDGE_URL, json=payload, timeout=BRIDGE_TIMEOUT_S)
+        r.raise_for_status()
+        reply = (r.json() or {}).get("reply", "")
+    except requests.exceptions.RequestException as e:
+        return "", f"(bridge unreachable: {str(e)[:200]})"
+    return _strip_dashes(reply.strip()), reply

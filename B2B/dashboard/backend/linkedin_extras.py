@@ -193,11 +193,72 @@ def autopilot_status():
 
 
 _DOMAIN_RE = re.compile(r"^[a-z0-9][a-z0-9\-.]*\.[a-z]{2,}$")
+_EMAIL_RE  = re.compile(r"^[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}$")
+
+
+def _archive_matching_leads(con, kind: str, value: str, reason: str) -> int:
+    """Move leads already in the DB that match a newly-added blocklist
+    entry into recyclebin. Prevents them from appearing in Drafted queues
+    after the block rule is added. Returns count archived.
+
+    Only touches leads that haven't been Sent yet — already-sent leads are
+    left as historical record."""
+    value = value.lower()
+    if kind == "email":
+        rows = con.execute(
+            "SELECT id FROM leads "
+            "WHERE LOWER(TRIM(email)) = ? AND status != 'Sent'",
+            (value,),
+        ).fetchall()
+    elif kind == "domain":
+        # Match emails ending in @<domain> OR @sub.<domain>.
+        rows = con.execute(
+            "SELECT id FROM leads WHERE status != 'Sent' AND ("
+            "  LOWER(email) LIKE ? OR LOWER(email) LIKE ?"
+            ")",
+            (f"%@{value}", f"%.{value}"),
+        ).fetchall()
+    elif kind == "company":
+        rows = con.execute(
+            "SELECT id FROM leads "
+            "WHERE status != 'Sent' AND LOWER(COALESCE(company, '')) LIKE ?",
+            (f"%{value}%",),
+        ).fetchall()
+    else:
+        return 0
+
+    archived = 0
+    for r in rows:
+        lead_id = r["id"]
+        row = con.execute("SELECT * FROM leads WHERE id = ?", (lead_id,)).fetchone()
+        if row is None:
+            continue
+        con.execute(
+            "INSERT OR REPLACE INTO recyclebin "
+            "(original_id, post_url, payload_json, reason, moved_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (
+                lead_id, row["post_url"],
+                json.dumps({k: row[k] for k in row.keys()}),
+                f"blocklist:{kind}:{value} ({reason})",
+                _now_iso(),
+            ),
+        )
+        con.execute("DELETE FROM leads WHERE id = ?", (lead_id,))
+        archived += 1
+    return archived
 
 
 class BlocklistIn(BaseModel):
-    kind: str = Field(pattern="^(company|domain)$")
-    value: str = Field(min_length=2, max_length=120)
+    kind: str = Field(pattern="^(company|domain|email)$")
+    value: str = Field(min_length=2, max_length=200)
+    reason: Optional[str] = Field(default=None, max_length=200)
+
+
+class BlocklistBulkIn(BaseModel):
+    # Paste a newline- or comma-separated list of emails (or domains).
+    # kind is auto-inferred per entry: contains '@' -> email; else domain.
+    text: str = Field(min_length=1, max_length=50_000)
     reason: Optional[str] = Field(default=None, max_length=200)
 
 
@@ -218,6 +279,9 @@ def add_blocklist(payload: BlocklistIn):
         value = value.lstrip("@")
         if not _DOMAIN_RE.match(value):
             raise HTTPException(400, "Domain must look like example.com")
+    elif payload.kind == "email":
+        if not _EMAIL_RE.match(value):
+            raise HTTPException(400, "Must be a valid email address")
 
     with connect() as con:
         try:
@@ -231,8 +295,67 @@ def add_blocklist(payload: BlocklistIn):
                 raise HTTPException(409, f"{payload.kind} '{value}' already blocked")
             raise
         _log(con, "blocklist_add", meta=payload.model_dump() | {"value": value})
+        archived = _archive_matching_leads(con, payload.kind, value,
+                                           reason=payload.reason or "blocklist")
         con.commit()
-    return {"ok": True}
+    return {"ok": True, "archived_existing": archived}
+
+
+@router.post("/blocklist/bulk")
+def bulk_add_blocklist(payload: BlocklistBulkIn):
+    """Paste a big list of emails / domains. Each non-empty token is
+    inferred (contains '@' → email; else → domain) and inserted. Duplicates
+    skipped silently. Existing matching leads are auto-archived to
+    recyclebin so they drop out of the Drafted queue."""
+    raw = payload.text.replace(",", "\n").replace(";", "\n")
+    tokens = [t.strip().lower() for t in raw.splitlines() if t.strip()]
+
+    added = {"email": 0, "domain": 0}
+    skipped = 0
+    invalid = []
+    archived_total = 0
+
+    with connect() as con:
+        for tok in tokens:
+            if "@" in tok:
+                if not _EMAIL_RE.match(tok):
+                    invalid.append(tok)
+                    continue
+                kind = "email"
+            else:
+                dom = tok.lstrip("@")
+                if not _DOMAIN_RE.match(dom):
+                    invalid.append(tok)
+                    continue
+                kind, tok = "domain", dom
+            try:
+                con.execute(
+                    "INSERT INTO blocklist (kind, value, reason, created_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    (kind, tok, payload.reason, _now_iso()),
+                )
+                added[kind] += 1
+                archived_total += _archive_matching_leads(
+                    con, kind, tok, reason=payload.reason or "blocklist_bulk"
+                )
+            except Exception as e:
+                if "UNIQUE" in str(e):
+                    skipped += 1
+                else:
+                    raise
+        _log(con, "blocklist_bulk_add", meta={
+            "added": added, "skipped_duplicates": skipped,
+            "invalid": len(invalid), "archived_existing": archived_total,
+        })
+        con.commit()
+
+    return {
+        "ok": True,
+        "added": added,
+        "skipped_duplicates": skipped,
+        "invalid": invalid[:20],   # first 20 for debugging
+        "archived_existing": archived_total,
+    }
 
 
 @router.post("/blocklist/{item_id}/delete")
@@ -247,11 +370,13 @@ def del_blocklist(item_id: int):
 
 
 def is_blocked(company: Optional[str], email: Optional[str]) -> Optional[dict]:
-    """Return {kind, value, reason} if blocked; None if clear."""
+    """Return {kind, value, reason} if blocked; None if clear.
+    Checks three kinds: exact-email match, domain (incl. subdomain match),
+    and company (substring match in the lead's company name)."""
     comp = (company or "").strip().lower()
     mail = (email or "").strip().lower()
     domain = mail.split("@", 1)[1] if "@" in mail else ""
-    if not (comp or domain):
+    if not (comp or domain or mail):
         return None
     with connect() as con:
         rows = con.execute(
@@ -259,6 +384,8 @@ def is_blocked(company: Optional[str], email: Optional[str]) -> Optional[dict]:
         ).fetchall()
     for r in rows:
         v = r["value"]
+        if r["kind"] == "email" and mail and mail == v:
+            return dict(r)
         if r["kind"] == "domain" and domain and (domain == v or domain.endswith("." + v)):
             return dict(r)
         if r["kind"] == "company" and comp and v in comp:
@@ -656,9 +783,37 @@ def run_followups(payload: FollowupRunIn):
         body = _build_followup_body(seq, lead.get("posted_by") or "", "")
         # Prefix subject with Re: to thread on recipient side.
         subject = f"Re: {lead.get('gen_subject') or 'Following up'}"
+        picked_account_id = gmail.pick_next_account_id()
+        if picked_account_id is None:
+            errors.append({"lead_id": lead["id"],
+                           "reason": "No Gmail account with remaining quota"})
+            continue
+
+        # Re-use the lead's original open_token so follow-up opens roll up
+        # into the same lead row; generate one if the lead predates tracking.
+        import secrets as _sec
+        with connect() as con:
+            r = con.execute(
+                "SELECT open_token FROM leads WHERE id = ?", (lead["id"],),
+            ).fetchone()
+            token = (r["open_token"] if r and r["open_token"] else _sec.token_urlsafe(22))
+            if not (r and r["open_token"]):
+                con.execute(
+                    "UPDATE leads SET open_token = ? WHERE id = ?",
+                    (token, lead["id"]),
+                )
+                con.commit()
+        import os as _os
+        _base = _os.environ.get(
+            "LINKEDIN_TRACKING_BASE_URL", "http://localhost:8900"
+        ).rstrip("/")
+        pixel_url = f"{_base}/api/linkedin/t/open/{token}.gif"
+
         try:
             result = gmail.send_email(
                 to=lead["email"], subject=subject, body=body,
+                account_id=picked_account_id,
+                tracking_pixel_url=pixel_url,
             )
             with connect() as con:
                 con.execute(
@@ -666,7 +821,8 @@ def run_followups(payload: FollowupRunIn):
                     "VALUES (?, ?, ?, ?)",
                     (lead["id"], seq, result.message_id, result.sent_at),
                 )
-                _record_send(con, lead["id"], result.message_id, result.sent_at)
+                _record_send(con, lead["id"], result.message_id, result.sent_at,
+                             account_id=result.account_id)
                 _log(con, "followup_send", lead_id=lead["id"],
                      meta={"sequence": seq, "msg_id": result.message_id})
                 con.commit()
@@ -675,6 +831,10 @@ def run_followups(payload: FollowupRunIn):
             with connect() as con:
                 _record_failure(con, lead["id"], f"followup:{e}")
                 con.commit()
+            try:
+                gmail.record_send_failure(picked_account_id, str(e))
+            except Exception:
+                pass
             errors.append({"lead_id": lead["id"], "reason": str(e)[:200]})
 
     return {"sent": sent, "skipped": skipped, "errors": errors, "total": len(due)}

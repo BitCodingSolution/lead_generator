@@ -1491,6 +1491,47 @@ body.dark-theme .scan-lead.saved.skipped:hover {
   font-size: 11px;
 }
 
+.scan-lead-tags {
+  display: inline-flex;
+  gap: 2px;
+  margin-left: auto;
+  padding: 2px;
+  background: #f6f8fa;
+  border-radius: var(--r-sm);
+}
+
+.scan-tag-btn {
+  padding: 2px 6px;
+  font-size: 12px;
+  line-height: 1;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  cursor: pointer;
+  opacity: 0.55;
+  transition: all 0.12s;
+}
+
+.scan-tag-btn:hover {
+  opacity: 1;
+}
+
+.scan-tag-btn.active {
+  opacity: 1;
+  background: #fff;
+  border-color: #d0d7de;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+}
+
+body.dark-theme .scan-lead-tags {
+  background: #1c1f26;
+}
+
+body.dark-theme .scan-tag-btn.active {
+  background: #2d333b;
+  border-color: #444c56;
+}
+
 body.dark-theme .scan-panel {
   background: #231529;
   border-color: #3d2d4a;
