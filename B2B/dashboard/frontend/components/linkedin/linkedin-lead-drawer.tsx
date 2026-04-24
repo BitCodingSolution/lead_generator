@@ -400,7 +400,11 @@ export function LinkedInLeadDrawer({
             </section>
 
             {lead.status === "Replied" && (
-              <RepliesSection leadId={lead.id} setToast={setToast} />
+              <RepliesSection
+                leadId={lead.id}
+                setToast={setToast}
+                onAfterSend={onClose}
+              />
             )}
 
             <section>
@@ -782,10 +786,13 @@ type RepliesPayload = {
 }
 
 function RepliesSection({
-  leadId, setToast,
+  leadId, setToast, onAfterSend,
 }: {
   leadId: number
   setToast: (s: string | null) => void
+  // Called once a reply has actually been sent — drawer uses this to
+  // dismiss itself so the user lands back on the leads list.
+  onAfterSend?: () => void
 }) {
   const { data, isLoading } = useSWR<RepliesPayload>(
     `/api/linkedin/leads/${leadId}/replies`,
@@ -843,6 +850,10 @@ function RepliesSection({
       setToast("Reply sent")
       setDraftBody("")
       mutate((k) => typeof k === "string" && k.startsWith("/api/linkedin/"))
+      // Dismiss the drawer once the send succeeds — user is done with
+      // this lead, no reason to keep them looking at it. Fires after the
+      // SWR mutate so the leads list shows the updated state on render.
+      onAfterSend?.()
     } catch (e) {
       setToast((e as Error).message)
     } finally {
@@ -966,7 +977,12 @@ function RepliesSection({
               onChange={(e) => setDraftBody(e.target.value)}
               rows={8}
               placeholder="Click 'Draft with Claude' or type your reply…"
-              className="w-full rounded border border-zinc-800 bg-zinc-900/60 px-2 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 font-mono leading-relaxed focus:outline-none focus:border-[hsl(250_80%_62%)]"
+              // Cap visible height so long drafts scroll within the
+              // textarea instead of forcing the whole drawer to grow.
+              // resize-y lets the user pull the handle bigger if they
+              // want; max-h hard-stops at ~half the viewport.
+              style={{ maxHeight: "50vh" }}
+              className="w-full rounded border border-zinc-800 bg-zinc-900/60 px-2 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 font-mono leading-relaxed focus:outline-none focus:border-[hsl(250_80%_62%)] overflow-y-auto resize-y"
             />
             <div className="mt-2 flex items-center justify-end gap-2">
               <button
