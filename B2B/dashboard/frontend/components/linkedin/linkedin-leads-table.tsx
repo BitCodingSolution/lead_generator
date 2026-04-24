@@ -269,8 +269,11 @@ export function LinkedInLeadsTable({
                   <Td>
                     <NotesCell lead={r} />
                   </Td>
-                  <Td className="text-xs text-zinc-500 tnum">
-                    {fmtDate(r.first_seen_at)}
+                  <Td className="text-xs text-zinc-500 tnum whitespace-nowrap">
+                    <div>{fmtDate(r.first_seen_at)}</div>
+                    <div className="text-[10px] text-zinc-600">
+                      {fmtTime(r.first_seen_at)}
+                    </div>
                   </Td>
                   <Td className="text-right pr-3">
                     {r.status === "Drafted" && r.email ? (
@@ -525,5 +528,17 @@ function fmtDate(iso: string): string {
     })
   } catch {
     return iso
+  }
+}
+
+function fmtTime(iso: string): string {
+  try {
+    return new Date(iso).toLocaleTimeString(undefined, {
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    })
+  } catch {
+    return ""
   }
 }

@@ -256,7 +256,7 @@ def list_leads(
         "last_seen":  "last_seen_at",
     }
     if sort == "score":
-        order_sql = "ORDER BY COALESCE(fit_score, -1) DESC, last_seen_at DESC"
+        order_sql = "ORDER BY COALESCE(fit_score, -1) DESC, first_seen_at DESC"
     elif "_" in sort and sort.rsplit("_", 1)[0] in SORT_COLUMN_MAP \
          and sort.rsplit("_", 1)[1] in ("asc", "desc"):
         col_key, direction = sort.rsplit("_", 1)
@@ -265,7 +265,10 @@ def list_leads(
         # even when many rows share the same sort key value.
         order_sql = f"ORDER BY {expr} {direction.upper()}, id DESC"
     else:
-        order_sql = "ORDER BY last_seen_at DESC"
+        # "recent" — order by when we first saw the lead (true creation),
+        # not last_seen_at (which bumps on every re-scan and shuffles old
+        # leads to the top whenever the extension re-pings them).
+        order_sql = "ORDER BY first_seen_at DESC, id DESC"
 
     with connect() as con:
         total = con.execute(
