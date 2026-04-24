@@ -3,7 +3,10 @@
 import * as React from "react"
 import { useSearchParams } from "next/navigation"
 import useSWR, { mutate } from "swr"
-import { Search, Inbox, Send, Loader2, Eye, Clock, FileWarning } from "lucide-react"
+import {
+  Search, Inbox, Send, Loader2, Eye, Clock, FileWarning,
+  ArrowUp, ArrowDown, ArrowUpDown,
+} from "lucide-react"
 import { cn } from "@/lib/utils"
 import { api, swrFetcher } from "@/lib/api"
 import type { LinkedInLead, LinkedInLeadsResponse } from "@/lib/types"
@@ -34,7 +37,10 @@ export function LinkedInLeadsTable({
     setStatus(urlStatus)
   }, [urlStatus, initialStatus])
   const [callFilter, setCallFilter] = React.useState<string>("")
-  const [sort, setSort] = React.useState<"recent" | "score">("recent")
+  // Sort accepts:
+  //   "recent" (default), "score" — the legacy global modes
+  //   "{col}_asc" / "{col}_desc" — set by clicking a column header
+  const [sort, setSort] = React.useState<string>("recent")
   const [q, setQ] = React.useState("")
   const [debounced, setDebounced] = React.useState("")
   const [openId, setOpenId] = React.useState<number | null>(null)
@@ -72,8 +78,25 @@ export function LinkedInLeadsTable({
   if (status) params.set("status", status)
   if (callFilter) params.set("call_status", callFilter)
   if (debounced) params.set("q", debounced)
-  if (sort === "score") params.set("sort", "score")
+  // "recent" is the backend default — omit to keep URLs tidy.
+  if (sort && sort !== "recent") params.set("sort", sort)
   params.set("limit", "200")
+
+  // Click a column header → toggle asc/desc on that column. Clicking any
+  // other column starts at asc. Switching back to the dropdown modes
+  // ("recent" / "score") is still handled by the select element.
+  function cycleSort(col: string) {
+    setSort((prev) => {
+      if (prev === `${col}_asc`)  return `${col}_desc`
+      if (prev === `${col}_desc`) return "recent"  // third click clears
+      return `${col}_asc`
+    })
+  }
+  function sortIcon(col: string) {
+    if (sort === `${col}_asc`)  return <ArrowUp   className="size-3 text-violet-300" />
+    if (sort === `${col}_desc`) return <ArrowDown className="size-3 text-violet-300" />
+    return <ArrowUpDown className="size-3 text-zinc-600 opacity-60 group-hover:opacity-100" />
+  }
 
   const { data, isLoading } = useSWR<LinkedInLeadsResponse>(
     `/api/linkedin/leads?${params.toString()}`,
@@ -124,13 +147,22 @@ export function LinkedInLeadsTable({
           <option value="none">— No signal</option>
         </select>
         <select
-          value={sort}
-          onChange={(e) => setSort(e.target.value as "recent" | "score")}
+          value={sort === "recent" || sort === "score" ? sort : "column"}
+          onChange={(e) => {
+            const v = e.target.value
+            if (v === "column") return  // placeholder for custom col sorts
+            setSort(v)
+          }}
           title="Sort order"
           className="rounded-md border border-zinc-800 bg-zinc-900/60 px-2 py-1.5 text-sm text-zinc-200 focus:outline-none focus:border-[hsl(250_80%_62%)]"
         >
           <option value="recent">Sort: recent</option>
           <option value="score">Sort: fit score</option>
+          {sort !== "recent" && sort !== "score" && (
+            <option value="column" disabled>
+              Sort: {sort.replace("_", " ")}
+            </option>
+          )}
         </select>
         <div className="ml-auto text-xs text-zinc-500 tnum">
           {isLoading ? "…" : `${data?.total ?? 0} rows`}
@@ -144,16 +176,16 @@ export function LinkedInLeadsTable({
           <table className="w-full text-sm">
             <thead>
               <tr className="text-left text-[11px] uppercase tracking-[0.08em] text-zinc-500 border-b border-zinc-800/70">
-                <Th>Fit</Th>
-                <Th>Company</Th>
-                <Th>Posted by</Th>
-                <Th>Role</Th>
-                <Th>Email</Th>
-                <Th>Phone</Th>
-                <Th>Status</Th>
-                <Th>Call</Th>
+                <Th sortKey="fit"        active={sort} onSort={cycleSort} icon={sortIcon("fit")}>Fit</Th>
+                <Th sortKey="company"    active={sort} onSort={cycleSort} icon={sortIcon("company")}>Company</Th>
+                <Th sortKey="posted_by"  active={sort} onSort={cycleSort} icon={sortIcon("posted_by")}>Posted by</Th>
+                <Th sortKey="role"       active={sort} onSort={cycleSort} icon={sortIcon("role")}>Role</Th>
+                <Th sortKey="email"      active={sort} onSort={cycleSort} icon={sortIcon("email")}>Email</Th>
+                <Th sortKey="phone"      active={sort} onSort={cycleSort} icon={sortIcon("phone")}>Phone</Th>
+                <Th sortKey="status"     active={sort} onSort={cycleSort} icon={sortIcon("status")}>Status</Th>
+                <Th sortKey="call"       active={sort} onSort={cycleSort} icon={sortIcon("call")}>Call</Th>
                 <Th>Notes</Th>
-                <Th>First seen</Th>
+                <Th sortKey="first_seen" active={sort} onSort={cycleSort} icon={sortIcon("first_seen")}>First seen</Th>
                 <Th></Th>
               </tr>
             </thead>
@@ -417,8 +449,36 @@ function NotesCell({ lead }: { lead: LinkedInLead }) {
   )
 }
 
-function Th({ children }: { children?: React.ReactNode }) {
-  return <th className="px-3 py-2 font-medium">{children}</th>
+function Th({
+  children, sortKey, active, onSort, icon,
+}: {
+  children?: React.ReactNode
+  sortKey?: string
+  active?: string
+  onSort?: (col: string) => void
+  icon?: React.ReactNode
+}) {
+  // Plain header when no sort hook provided (e.g. Notes column).
+  if (!sortKey || !onSort) {
+    return <th className="px-3 py-2 font-medium">{children}</th>
+  }
+  const isActive = active === `${sortKey}_asc` || active === `${sortKey}_desc`
+  return (
+    <th className="px-3 py-2 font-medium">
+      <button
+        type="button"
+        onClick={() => onSort(sortKey)}
+        className={cn(
+          "group inline-flex items-center gap-1 uppercase tracking-[0.08em]",
+          "transition-colors hover:text-zinc-300",
+          isActive ? "text-violet-200" : "text-zinc-500",
+        )}
+      >
+        {children}
+        {icon}
+      </button>
+    </th>
+  )
 }
 function Td({ children, className }: { children: React.ReactNode; className?: string }) {
   return <td className={cn("px-3 py-2 text-zinc-200", className)}>{children}</td>

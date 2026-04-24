@@ -237,13 +237,35 @@ def list_leads(
         like = f"%{q}%"
         params.extend([like, like, like, like])
     where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
-    # Score-sort puts unscored at the bottom; recent-sort keeps legacy
-    # last_seen ordering so the default view doesn't reshuffle.
-    order_sql = (
-        "ORDER BY COALESCE(fit_score, -1) DESC, last_seen_at DESC"
-        if sort == "score"
-        else "ORDER BY last_seen_at DESC"
-    )
+    # Sort resolution. Two legacy tokens kept working exactly as before:
+    #   - "recent": last_seen_at DESC (default)
+    #   - "score":  fit_score DESC, last_seen_at DESC
+    # Plus column-based tokens for click-to-sort headers:
+    #   "{col}_asc" / "{col}_desc" where col is one of the whitelist below.
+    # Unknown tokens fall back to "recent" so a stale URL never 500s.
+    SORT_COLUMN_MAP = {
+        "fit":        "COALESCE(fit_score, -1)",
+        "company":    "LOWER(COALESCE(company, ''))",
+        "posted_by":  "LOWER(COALESCE(posted_by, ''))",
+        "role":       "LOWER(COALESCE(role, ''))",
+        "email":      "LOWER(COALESCE(email, ''))",
+        "phone":      "COALESCE(phone, '')",
+        "status":     "status",
+        "call":       "COALESCE(call_status, '')",
+        "first_seen": "first_seen_at",
+        "last_seen":  "last_seen_at",
+    }
+    if sort == "score":
+        order_sql = "ORDER BY COALESCE(fit_score, -1) DESC, last_seen_at DESC"
+    elif "_" in sort and sort.rsplit("_", 1)[0] in SORT_COLUMN_MAP \
+         and sort.rsplit("_", 1)[1] in ("asc", "desc"):
+        col_key, direction = sort.rsplit("_", 1)
+        expr = SORT_COLUMN_MAP[col_key]
+        # Tiebreak on id so the order is stable across paginated fetches
+        # even when many rows share the same sort key value.
+        order_sql = f"ORDER BY {expr} {direction.upper()}, id DESC"
+    else:
+        order_sql = "ORDER BY last_seen_at DESC"
 
     with connect() as con:
         total = con.execute(
