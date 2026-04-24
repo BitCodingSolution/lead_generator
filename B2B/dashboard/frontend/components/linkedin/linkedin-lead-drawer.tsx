@@ -890,7 +890,13 @@ function RepliesSection({
               </span>
             )}
           </div>
-          <div className="rounded border border-zinc-800 bg-zinc-900/60 p-2 text-xs text-zinc-200 whitespace-pre-wrap max-h-48 overflow-y-auto leading-relaxed">
+          {/* Resizable read-only viewport — user can drag the corner
+              handle to grow it for long inbound mails, scrolls inside
+              when content exceeds the box. */}
+          <div
+            className="rounded border border-zinc-800 bg-zinc-900/60 p-2 text-xs text-zinc-200 whitespace-pre-wrap overflow-y-auto resize-y leading-relaxed"
+            style={{ minHeight: "8rem", height: "12rem", maxHeight: "60vh" }}
+          >
             {latest.body || latest.snippet || "(empty)"}
           </div>
 
