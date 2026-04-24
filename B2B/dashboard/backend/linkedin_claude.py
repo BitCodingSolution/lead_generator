@@ -312,6 +312,8 @@ _REPLY_SYSTEM_PROMPT = (
 def _reply_user_prompt(
     *, prospect_first_name: str, prospect_reply_text: str,
     original_subject: str, original_body: str,
+    user_hint: str = "",
+    style_examples: Optional[list[dict]] = None,
 ) -> str:
     parts = [
         f"Prospect first name: {prospect_first_name or '(unknown)'}",
@@ -323,10 +325,35 @@ def _reply_user_prompt(
         "",
         "Their reply to us:",
         (prospect_reply_text or "(empty)").strip(),
+    ]
+    # Few-shot style guidance from Jaydip's own past replies. Claude learns
+    # voice/length/structure by example without us having to maintain an
+    # explicit tone doc.
+    if style_examples:
+        parts.extend(["", "--- PAST REPLIES FOR STYLE GUIDANCE ONLY ---",
+                      "(Mirror the voice, length, and sentence rhythm. DO NOT copy "
+                      "content — the new reply must respond to *this* prospect's "
+                      "specific message.)"])
+        for i, ex in enumerate(style_examples, 1):
+            parts.extend([
+                "",
+                f"Example {i} — they wrote:",
+                ex.get("inbound", "").strip(),
+                f"Example {i} — I replied:",
+                ex.get("outbound", "").strip(),
+            ])
+        parts.append("--- END OF EXAMPLES ---")
+    if user_hint:
+        parts.extend([
+            "",
+            "USER DIRECTION FOR THIS REPLY (highest priority — follow this):",
+            user_hint.strip(),
+        ])
+    parts.extend([
         "",
         "Draft my response now. Output ONLY the reply body — no subject, no "
         "quoted-text, no signature block beyond a single 'Jaydip' at the end.",
-    ]
+    ])
     return "\n".join(parts)
 
 
@@ -379,8 +406,16 @@ def classify_sentiment(text: str) -> Optional[str]:
 def generate_reply_draft(
     *, prospect_first_name: str, prospect_reply_text: str,
     original_subject: str, original_body: str,
+    user_hint: str = "",
+    style_examples: Optional[list[dict]] = None,
 ) -> tuple[str, str]:
-    """Returns (body, raw). If Bridge unreachable, body='' and raw has error."""
+    """Returns (body, raw). If Bridge unreachable, body='' and raw has error.
+
+    `user_hint` (optional): free-text instruction from Jaydip for this
+    specific reply — Claude treats it as the highest-priority directive.
+    `style_examples` (optional): list of {inbound, outbound} dicts from
+    Jaydip's past sent replies — fed as few-shot style guidance so the
+    drafter gradually matches his voice."""
     payload = {
         "system_prompt": _REPLY_SYSTEM_PROMPT,
         "user_message": _reply_user_prompt(
@@ -388,6 +423,8 @@ def generate_reply_draft(
             prospect_reply_text=prospect_reply_text,
             original_subject=original_subject,
             original_body=original_body,
+            user_hint=user_hint,
+            style_examples=style_examples,
         ),
     }
     try:

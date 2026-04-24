@@ -1581,15 +1581,24 @@ def _record_failure(con, lead_id: int, err: str) -> None:
 @router.get("/leads/{lead_id:int}/replies")
 def list_lead_replies(lead_id: int):
     """Return all inbound replies for a lead + original outgoing context
-    needed to draft/send a threaded response."""
+    needed to draft/send a threaded response. Also resolves which of our
+    Gmail accounts received the reply (same account that sent the initial
+    mail — Gmail threads it back)."""
     with connect() as con:
         lead = con.execute(
             "SELECT id, email, posted_by, company, role, gen_subject, "
-            "gen_body, sent_message_id, sent_at "
+            "gen_body, sent_message_id, sent_at, sent_via_account_id "
             "FROM leads WHERE id = ?", (lead_id,),
         ).fetchone()
         if lead is None:
             raise HTTPException(404, "Lead not found")
+        received_on = None
+        if lead["sent_via_account_id"]:
+            acct = con.execute(
+                "SELECT email FROM gmail_accounts WHERE id = ?",
+                (lead["sent_via_account_id"],),
+            ).fetchone()
+            received_on = acct["email"] if acct else None
         reps = con.execute(
             "SELECT id, gmail_msg_id, from_email, subject, snippet, body, "
             "received_at, kind, handled_at, sentiment, "
@@ -1597,15 +1606,55 @@ def list_lead_replies(lead_id: int):
             "FROM replies WHERE lead_id = ? ORDER BY received_at ASC",
             (lead_id,),
         ).fetchall()
+    lead_out = dict(lead)
+    lead_out["received_on_email"] = received_on
     return {
-        "lead": dict(lead),
+        "lead": lead_out,
         "replies": [dict(r) for r in reps],
     }
 
 
+class DraftReplyBody(BaseModel):
+    # User-typed direction for this specific reply. Claude blends the
+    # instruction into the tone/content instead of ignoring it. Optional —
+    # an empty value falls back to the generic drafter.
+    hint: Optional[str] = Field(default=None, max_length=1000)
+
+
+def _recent_style_examples(con, limit: int = 5) -> list[dict]:
+    """Last N outbound replies Jaydip actually sent (captured as
+    reply_sent events), paired with the inbound that prompted them. Used
+    as few-shot style guidance for Claude so the drafter gradually picks
+    up whatever wording Jaydip keeps reaching for."""
+    rows = con.execute(
+        """
+        SELECT e.meta_json, e.at
+        FROM events e
+        WHERE e.kind = 'reply_sent'
+        ORDER BY e.at DESC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    out: list[dict] = []
+    for r in rows:
+        try:
+            m = json.loads(r["meta_json"] or "{}")
+        except Exception:
+            continue
+        inbound = (m.get("inbound_snippet") or "").strip()
+        outbound = (m.get("outbound_body") or "").strip()
+        if inbound and outbound:
+            out.append({"inbound": inbound[:400], "outbound": outbound[:800]})
+    return out
+
+
 @router.post("/leads/{lead_id:int}/draft-reply")
-def draft_reply(lead_id: int):
-    """Ask the Bridge to draft a response to the lead's latest reply."""
+def draft_reply(lead_id: int, payload: Optional[DraftReplyBody] = None):
+    """Ask the Bridge to draft a response to the lead's latest reply.
+    Accepts an optional free-text `hint` — Claude incorporates it into
+    the draft instead of producing a generic response."""
+    hint = (payload.hint or "").strip() if payload else ""
     with connect() as con:
         lead = con.execute(
             "SELECT id, posted_by, gen_subject, gen_body "
@@ -1619,6 +1668,7 @@ def draft_reply(lead_id: int):
             "ORDER BY received_at DESC LIMIT 1",
             (lead_id,),
         ).fetchone()
+        examples = _recent_style_examples(con, limit=5)
     if last is None:
         raise HTTPException(400, "No inbound reply to respond to")
     reply_text = (last["body"] or last["snippet"] or "").strip()
@@ -1628,10 +1678,12 @@ def draft_reply(lead_id: int):
         prospect_reply_text=reply_text,
         original_subject=lead["gen_subject"] or "",
         original_body=lead["gen_body"] or "",
+        user_hint=hint,
+        style_examples=examples,
     )
     if not draft:
         raise HTTPException(502, f"Bridge failed: {raw}")
-    return {"body": draft}
+    return {"body": draft, "used_hint": bool(hint), "style_examples_used": len(examples)}
 
 
 def _first_name_from_posted_by(raw: str) -> str:
@@ -1697,6 +1749,19 @@ def send_reply(lead_id: int, payload: SendReplyBody):
 
     now = dt.datetime.now().isoformat(timespec="seconds")
     with connect() as con:
+        # Pull the inbound that Jaydip is responding to — we persist it
+        # alongside his outbound body so the drafter can feed past pairs
+        # as few-shot examples on future replies.
+        last_inbound = con.execute(
+            "SELECT body, snippet FROM replies "
+            "WHERE lead_id = ? AND kind = 'reply' "
+            "ORDER BY received_at DESC LIMIT 1",
+            (lead_id,),
+        ).fetchone()
+        inbound_text = ""
+        if last_inbound:
+            inbound_text = (last_inbound["body"] or last_inbound["snippet"] or "").strip()
+
         # Mark the last inbound reply as handled.
         con.execute(
             "UPDATE replies SET handled_at = ? "
@@ -1707,9 +1772,18 @@ def send_reply(lead_id: int, payload: SendReplyBody):
         con.execute(
             "UPDATE leads SET needs_attention = 0 WHERE id = ?", (lead_id,),
         )
-        _log_event(con, "reply_sent", lead_id=lead_id,
-                   meta={"account_id": account_id, "msg_id": result.message_id,
-                         "chars": len(payload.body)})
+        _log_event(
+            con, "reply_sent", lead_id=lead_id,
+            meta={
+                "account_id": account_id,
+                "msg_id": result.message_id,
+                "chars": len(payload.body),
+                # Store both sides trimmed — _recent_style_examples reads this
+                # to feed Claude few-shot style guidance on future drafts.
+                "inbound_snippet": inbound_text[:500],
+                "outbound_body": payload.body[:1500],
+            },
+        )
         con.commit()
     return {"ok": True, "message_id": result.message_id, "sent_at": result.sent_at}
 
@@ -2561,6 +2635,9 @@ def _auto_draft_for_reply(reply_id: int, lead_id: int) -> None:
             rep = con.execute(
                 "SELECT body, snippet FROM replies WHERE id = ?", (reply_id,),
             ).fetchone()
+            # Same style exemplars the on-demand drafter uses, so the
+            # background auto-draft also benefits from the learned voice.
+            examples = _recent_style_examples(con, limit=5)
         if not (lead and rep):
             return
         reply_text = (rep["body"] or rep["snippet"] or "").strip()
@@ -2572,6 +2649,7 @@ def _auto_draft_for_reply(reply_id: int, lead_id: int) -> None:
             prospect_reply_text=reply_text,
             original_subject=lead["gen_subject"] or "",
             original_body=lead["gen_body"] or "",
+            style_examples=examples,
         )
         if not draft:
             return

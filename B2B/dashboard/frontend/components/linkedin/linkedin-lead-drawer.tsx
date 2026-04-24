@@ -718,7 +718,12 @@ const REPLY_TEMPLATES: { label: string; body: string }[] = [
 ]
 
 type RepliesPayload = {
-  lead: { id: number; email: string | null; gen_subject: string | null }
+  lead: {
+    id: number
+    email: string | null
+    gen_subject: string | null
+    received_on_email: string | null
+  }
   replies: Array<{
     id: number
     from_email: string | null
@@ -747,6 +752,9 @@ function RepliesSection({
   const [draftBody, setDraftBody] = React.useState("")
   const [busy, setBusy] = React.useState<"draft" | "send" | null>(null)
   const [prefilled, setPrefilled] = React.useState(false)
+  // Free-text instruction Jaydip can pass into Regenerate. Cleared after
+  // each successful regen so a stale hint doesn't sneak into the next one.
+  const [hint, setHint] = React.useState("")
 
   const inbound = (data?.replies ?? []).filter((r) => r.kind === "reply")
   const latest = inbound[inbound.length - 1]
@@ -766,9 +774,15 @@ function RepliesSection({
     try {
       const res = await api.post<{ body: string }>(
         `/api/linkedin/leads/${leadId}/draft-reply`,
+        hint.trim() ? { hint: hint.trim() } : undefined,
       )
       setDraftBody(res.body || "")
-      if (!res.body) setToast("Bridge returned empty draft")
+      if (!res.body) {
+        setToast("Bridge returned empty draft")
+      } else {
+        // Hint consumed — clear it so the next regen starts fresh.
+        setHint("")
+      }
     } catch (e) {
       setToast((e as Error).message)
     } finally {
@@ -816,8 +830,15 @@ function RepliesSection({
         <div className="text-xs text-zinc-500">No reply content captured.</div>
       ) : (
         <>
-          <div className="text-[11px] text-zinc-400 mb-1">
-            From <span className="font-mono text-zinc-300">{latest.from_email}</span>
+          <div className="text-[11px] text-zinc-400 mb-1 flex flex-wrap items-center gap-x-3 gap-y-0.5">
+            <span>
+              From <span className="font-mono text-zinc-300">{latest.from_email}</span>
+            </span>
+            {data?.lead.received_on_email && (
+              <span className="text-zinc-500">
+                → on <span className="font-mono text-zinc-400">{data.lead.received_on_email}</span>
+              </span>
+            )}
           </div>
           <div className="rounded border border-zinc-800 bg-zinc-900/60 p-2 text-xs text-zinc-200 whitespace-pre-wrap max-h-48 overflow-y-auto leading-relaxed">
             {latest.body || latest.snippet || "(empty)"}
@@ -842,7 +863,17 @@ function RepliesSection({
               <button
                 onClick={onDraft}
                 disabled={!!busy}
-                className="inline-flex items-center gap-1 rounded bg-[hsl(250_80%_62%)] px-2 py-0.5 text-[11px] text-white hover:bg-[hsl(250_80%_70%)] disabled:opacity-50"
+                className={cn(
+                  "inline-flex items-center gap-1 rounded px-2 py-0.5 text-[11px] text-white disabled:opacity-50",
+                  hint.trim()
+                    ? "bg-[hsl(280_80%_62%)] hover:bg-[hsl(280_80%_70%)]"
+                    : "bg-[hsl(250_80%_62%)] hover:bg-[hsl(250_80%_70%)]",
+                )}
+                title={
+                  hint.trim()
+                    ? "Regenerate using your hint above"
+                    : "Regenerate from the inbound reply (no hint)"
+                }
               >
                 {busy === "draft" ? (
                   <Loader2 className="size-3 animate-spin" />
@@ -852,6 +883,24 @@ function RepliesSection({
                 {latest?.auto_draft_body ? "Regenerate" : "Draft with Claude"}
               </button>
             </div>
+
+            {/* Hint input — Jaydip types "what to say" here, Claude blends it
+                into the regenerated draft. Empty = generic regenerate. */}
+            <div className="mb-1.5">
+              <textarea
+                value={hint}
+                onChange={(e) => setHint(e.target.value)}
+                placeholder="Optional: tell Claude what to say (e.g. 'thank them, ask for the JD link', 'mention 5 yrs Kubernetes', 'politely decline'). Leave blank for a generic reply."
+                rows={2}
+                className="w-full resize-none rounded border border-zinc-800 bg-zinc-900/40 px-2 py-1.5 text-[12px] text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-[hsl(280_80%_62%)] leading-relaxed"
+              />
+              {hint.trim() && (
+                <div className="mt-0.5 text-[10px] text-[hsl(280_80%_78%)]">
+                  ✨ Regenerate will use this hint
+                </div>
+              )}
+            </div>
+
             <div className="flex flex-wrap gap-1 mb-1.5">
               {REPLY_TEMPLATES.map((t) => (
                 <button
