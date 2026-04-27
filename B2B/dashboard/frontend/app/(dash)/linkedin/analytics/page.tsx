@@ -155,6 +155,124 @@ export default function LinkedInAnalyticsPage() {
           </ResponsiveContainer>
         </div>
       </section>
+
+      <OutcomeBreakdown />
+    </div>
+  )
+}
+
+type OutcomeBucket = {
+  key: string
+  sent: number
+  replied: number
+  positive: number
+  reply_rate_pct: number
+  positive_rate_pct: number
+}
+
+type OutcomeStats = {
+  totals: {
+    sent: number
+    replied: number
+    positive: number
+    reply_rate_pct: number
+    positive_rate_pct: number
+  }
+  by_cv_cluster: OutcomeBucket[]
+  by_body_length: OutcomeBucket[]
+  by_subject_first: OutcomeBucket[]
+  by_weekday: OutcomeBucket[]
+}
+
+function OutcomeBreakdown() {
+  const { data } = useSWR<OutcomeStats>(
+    "/api/linkedin/outreach-stats",
+    swrFetcher,
+    { refreshInterval: 120_000 },
+  )
+
+  if (!data || data.totals.sent === 0) {
+    return (
+      <section className="rounded-xl border border-zinc-800/80 bg-[#18181b] p-4">
+        <div className="text-[11px] font-medium uppercase tracking-[0.1em] text-zinc-500 mb-2">
+          What works — reply rate by style
+        </div>
+        <div className="text-xs text-zinc-500">
+          Not enough sent emails yet. Data appears once you start getting
+          replies on sent drafts.
+        </div>
+      </section>
+    )
+  }
+
+  const avg = data.totals.reply_rate_pct
+
+  return (
+    <section className="rounded-xl border border-zinc-800/80 bg-[#18181b] p-4">
+      <div className="flex items-center justify-between mb-3">
+        <div className="text-[11px] font-medium uppercase tracking-[0.1em] text-zinc-500">
+          What works — reply rate by style
+        </div>
+        <div className="text-[11px] text-zinc-500">
+          Baseline: {avg}% reply rate ({data.totals.replied}/{data.totals.sent})
+        </div>
+      </div>
+      <div className="grid md:grid-cols-2 gap-4">
+        <OutcomeTable title="By CV / pitch"      rows={data.by_cv_cluster}    baseline={avg} />
+        <OutcomeTable title="By body length"     rows={data.by_body_length}   baseline={avg} />
+        <OutcomeTable title="By subject opener"  rows={data.by_subject_first} baseline={avg} />
+        <OutcomeTable title="By weekday sent"    rows={data.by_weekday}       baseline={avg} />
+      </div>
+    </section>
+  )
+}
+
+function OutcomeTable({
+  title, rows, baseline,
+}: {
+  title: string
+  rows: OutcomeBucket[]
+  baseline: number
+}) {
+  const visible = rows.filter((r) => r.sent >= 1).slice(0, 8)
+  return (
+    <div className="rounded-md border border-zinc-800/80 bg-zinc-900/40">
+      <div className="px-3 py-2 border-b border-zinc-800/80 text-[11px] font-medium text-zinc-400">
+        {title}
+      </div>
+      <table className="w-full text-xs">
+        <thead className="text-[10px] uppercase tracking-wide text-zinc-500">
+          <tr>
+            <th className="text-left py-1.5 px-3 font-normal">Bucket</th>
+            <th className="text-right py-1.5 px-2 font-normal">Sent</th>
+            <th className="text-right py-1.5 px-2 font-normal">Reply</th>
+            <th className="text-right py-1.5 px-3 font-normal">Rate</th>
+          </tr>
+        </thead>
+        <tbody>
+          {visible.map((r) => {
+            const diff = r.reply_rate_pct - baseline
+            const colour =
+              r.sent < 3
+                ? "text-zinc-500"
+                : diff > 2
+                  ? "text-emerald-300"
+                  : diff < -2
+                    ? "text-rose-300"
+                    : "text-zinc-300"
+            return (
+              <tr key={r.key} className="border-t border-zinc-800/60">
+                <td className="py-1.5 px-3 text-zinc-300 truncate">{r.key}</td>
+                <td className="py-1.5 px-2 text-right text-zinc-400">{r.sent}</td>
+                <td className="py-1.5 px-2 text-right text-zinc-400">{r.replied}</td>
+                <td className={`py-1.5 px-3 text-right font-mono ${colour}`}>
+                  {r.reply_rate_pct}%
+                </td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
     </div>
   )
 }

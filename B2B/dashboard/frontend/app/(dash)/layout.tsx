@@ -1,5 +1,7 @@
 import { Sidebar } from "@/components/sidebar"
 import { Topbar } from "@/components/topbar"
+import { PendingTitleUpdater } from "@/components/pending-title-updater"
+import { ReplyNotifications } from "@/components/reply-notifications"
 
 export default function DashLayout({ children }: { children: React.ReactNode }) {
   return (
@@ -11,6 +13,8 @@ export default function DashLayout({ children }: { children: React.ReactNode }) 
           {children}
         </main>
       </div>
+      <PendingTitleUpdater />
+      <ReplyNotifications />
     </div>
   )
 }

@@ -14,6 +14,9 @@ type Props = {
   loading?: boolean
   index?: number
   href?: string
+  /** Small attention-grabbing pill rendered above the icon. Used to flag
+   * unfinished work tied to this metric (e.g. "3 pending action"). */
+  badge?: { text: string; tone?: "amber" | "rose" | "emerald" | "sky" } | null
 }
 
 const ACCENTS: Record<NonNullable<Props["accent"]>, string> = {
@@ -35,7 +38,14 @@ export function KpiCard({
   loading,
   index = 0,
   href,
+  badge,
 }: Props) {
+  const BADGE_TONE = {
+    amber: "bg-amber-500/20 text-amber-200 border-amber-500/40",
+    rose: "bg-rose-500/20 text-rose-200 border-rose-500/40",
+    emerald: "bg-emerald-500/20 text-emerald-200 border-emerald-500/40",
+    sky: "bg-sky-500/20 text-sky-200 border-sky-500/40",
+  } as const
   const Root = href ? motion(Link) : motion.div
   const rootProps = href ? ({ href } as { href: string }) : {}
   return (
@@ -60,7 +70,19 @@ export function KpiCard({
           <div className="text-xs font-medium uppercase tracking-[0.1em] text-zinc-500">
             {label}
           </div>
-          {icon && <div className="text-zinc-500 group-hover:text-zinc-400 transition-colors">{icon}</div>}
+          <div className="flex items-center gap-1.5">
+            {badge && (
+              <span
+                className={cn(
+                  "rounded border px-1.5 py-0.5 text-[10px] font-medium tnum animate-pulse",
+                  BADGE_TONE[badge.tone ?? "amber"],
+                )}
+              >
+                {badge.text}
+              </span>
+            )}
+            {icon && <div className="text-zinc-500 group-hover:text-zinc-400 transition-colors">{icon}</div>}
+          </div>
         </div>
 
         <div className="mt-3 flex items-baseline gap-2">

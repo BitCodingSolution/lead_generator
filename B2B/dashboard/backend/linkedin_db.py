@@ -52,11 +52,17 @@ CREATE TABLE IF NOT EXISTS leads (
   bounced_at      TEXT,
   follow_up_at    TEXT,
   needs_attention INTEGER NOT NULL DEFAULT 0,
-  sent_message_id TEXT
+  sent_message_id TEXT,
+  -- ISO timestamp the lead is snoozed until. While set + in the future
+  -- needs_attention is forced to 0 and the leads list dims the row.
+  -- When the timestamp passes, a lazy sweep on /leads clears it and
+  -- restores needs_attention=1 so the lead resurfaces.
+  remind_at       TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_leads_status    ON leads(status);
 CREATE INDEX IF NOT EXISTS idx_leads_attention ON leads(needs_attention);
 CREATE INDEX IF NOT EXISTS idx_leads_last_seen ON leads(last_seen_at);
+CREATE INDEX IF NOT EXISTS idx_leads_remind_at ON leads(remind_at);
 
 CREATE TABLE IF NOT EXISTS recyclebin (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -86,6 +92,11 @@ CREATE TABLE IF NOT EXISTS safety_state (
   warning_paused_until TEXT,
   autopilot_enabled    INTEGER NOT NULL DEFAULT 0,
   autopilot_hour       INTEGER NOT NULL DEFAULT 10,
+  autopilot_minute     INTEGER NOT NULL DEFAULT 0,
+  -- NULL = send the full effective daily cap. An integer caps the
+  -- autopilot batch at exactly N leads so the user can drip slower
+  -- than the account's warmup allowance.
+  autopilot_count      INTEGER,
   -- IANA timezone name the autopilot hour is evaluated in. Defaults to
   -- local time (empty string) for backwards-compat; set to e.g.
   -- 'Asia/Kolkata' to pin the daily trigger when the server TZ differs.
@@ -177,6 +188,22 @@ CREATE TABLE IF NOT EXISTS followups (
   sent_at       TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_followups_lead ON followups(lead_id);
+
+-- Per-company enrichment cache. Populated lazily before drafting (or via
+-- a manual button) so the drafter can reference real-world company
+-- context — what they do, recent news, headcount hints — without paying
+-- the fetch cost on every draft.
+--   summary:   short text (~200-500 chars) extracted from homepage
+--              meta description / first paragraph. Empty = "we tried
+--              and got nothing" — caller respects the cooldown to
+--              avoid hammering broken endpoints.
+--   source:    where the data came from (homepage URL or 'manual').
+CREATE TABLE IF NOT EXISTS company_enrichment (
+  company    TEXT PRIMARY KEY,
+  summary    TEXT,
+  source     TEXT,
+  fetched_at TEXT NOT NULL
+);
 
 -- Autopilot state (tracked per-day for visibility).
 CREATE TABLE IF NOT EXISTS autopilot_runs (
@@ -334,6 +361,29 @@ def _migrate(con) -> None:
         con.execute(
             "ALTER TABLE safety_state ADD COLUMN warmup_curve_json TEXT"
         )
+    # Auto follow-up sequences: when 1, the daily _followups_tick fires
+    # run_followups() at the configured hour. Stays 0 by default so
+    # upgrading users opt in deliberately rather than getting surprise
+    # outbound mail.
+    if "followups_autopilot" not in safety_cols:
+        con.execute(
+            "ALTER TABLE safety_state ADD COLUMN "
+            "followups_autopilot INTEGER NOT NULL DEFAULT 0"
+        )
+    if "followups_hour" not in safety_cols:
+        con.execute(
+            "ALTER TABLE safety_state ADD COLUMN "
+            "followups_hour INTEGER NOT NULL DEFAULT 11"
+        )
+
+    # Intent column on replies — finer-grained than sentiment, drives
+    # which reply template the drawer surfaces. Computed once on inbound,
+    # stored so the UI can sort/filter without re-running the regex.
+    reply_cols = {
+        r[1] for r in con.execute("PRAGMA table_info(replies)").fetchall()
+    }
+    if "intent" not in reply_cols:
+        con.execute("ALTER TABLE replies ADD COLUMN intent TEXT")
 
     # One-shot migration: if a pre-multi-account gmail_auth singleton exists
     # (old installs) and gmail_accounts is empty, seed the first account from

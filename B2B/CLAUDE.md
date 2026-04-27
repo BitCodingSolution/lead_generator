@@ -40,7 +40,7 @@ See [docs/DEALFRONT-LEADS.md](docs/DEALFRONT-LEADS.md) for sample leads to test 
 
 ## Pushing to GitHub
 
-Remote lives at `github.com/pradipkachhadiya123/lead_generator` with this
+Remote lives at `github.com/BitCodingSolution/lead_generator` with this
 whole folder as the `B2B/` subfolder. Local `H:/Lead Generator/B2B/` is
 just the working tree — it no longer has its own `.git`. To publish:
 

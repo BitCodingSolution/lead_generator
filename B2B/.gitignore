@@ -30,6 +30,10 @@ dist/
 .api_key
 api_key.txt
 
+# Personal profile used by reply drafter to fill screening forms.
+# Contains DOB / mobile / CTC / etc. — never commit.
+dashboard/backend/jaydip_profile.json
+
 # --- Editor / OS ---
 .vscode/
 .idea/

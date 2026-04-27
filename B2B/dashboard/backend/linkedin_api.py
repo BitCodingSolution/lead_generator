@@ -31,6 +31,7 @@ from linkedin_claude import (
     BridgeParseError,
     BridgeUnreachable,
     bridge_is_up,
+    draft_variety_key,
     generate_draft as _claude_generate,
 )
 import linkedin_claude
@@ -109,6 +110,10 @@ class OverviewResponse(BaseModel):
     queued: int
     sent_today: int
     replied: int
+    # Replies still awaiting Jaydip's action (handled = 0). Drives the
+    # "X pending" sub-line on the Replied KPI so a glance at the dashboard
+    # tells him whether any conversations need triage.
+    replied_pending: int = 0
     bounced: int
     quota_used: int
     quota_cap: int
@@ -119,6 +124,12 @@ class OverviewResponse(BaseModel):
     auto_paused_accounts: list[AutoPausedAccount] = []
 
 
+class AutopilotTodayRun(BaseModel):
+    fired_at: str
+    total_queued: int
+    status: str
+
+
 class SafetyState(BaseModel):
     daily_sent_count: int
     daily_sent_date: Optional[str]
@@ -127,9 +138,21 @@ class SafetyState(BaseModel):
     warning_paused_until: Optional[str]
     autopilot_enabled: bool
     autopilot_hour: int
+    autopilot_minute: int
+    # None = send the full effective daily cap; int = cap at this many.
+    autopilot_count: Optional[int]
     autopilot_tz: str
     business_hours_only: bool
     safety_mode: str
+    # Auto follow-up sequencer: when on, _followups_tick fires
+    # run_followups() once a day at followups_hour local. Falls back to
+    # the cadence in linkedin_extras.FOLLOWUP_DAYS (default 3, 7).
+    followups_autopilot: bool = False
+    followups_hour: int = 11
+    # Populated when autopilot has already fired (or been skipped) today.
+    # UI uses this to show a "Already ran at HH:MM" state + expose a manual
+    # reset button so the user can re-fire for the same day.
+    autopilot_today: Optional[AutopilotTodayRun] = None
 
 
 # ---------- helpers ----------
@@ -170,6 +193,18 @@ def overview() -> OverviewResponse:
         queued = cnt("status IN ('Queued', 'Sending')")
         sent_today = cnt("DATE(sent_at) = ?", (_today(),))
         replied = cnt("status = 'Replied'")
+        # Pending = unhandled inbound replies. Mirror exactly what the
+        # /replies UI shows in "Unhandled only" mode so the KPI counter
+        # never disagrees with the inbox feed:
+        #   - kind = 'reply' (excludes bounces / auto-replies)
+        #   - handled_at IS NULL (still needs action)
+        # Count rows (NOT distinct lead_id) — the inbox renders one row
+        # per reply, so two unhandled mails from the same lead must show
+        # as 2 in the badge.
+        replied_pending = con.execute(
+            "SELECT COUNT(*) FROM replies "
+            "WHERE kind = 'reply' AND handled_at IS NULL"
+        ).fetchone()[0]
         bounced = cnt("status = 'Bounced'")
 
         safety = con.execute("SELECT * FROM safety_state WHERE id=1").fetchone()
@@ -188,6 +223,7 @@ def overview() -> OverviewResponse:
             queued=queued,
             sent_today=sent_today,
             replied=replied,
+            replied_pending=replied_pending,
             bounced=bounced,
             quota_used=safety["daily_sent_count"] if safety else 0,
             quota_cap=_effective_daily_cap(con),
@@ -232,10 +268,11 @@ def list_leads(
             clauses.append("call_status IS NOT NULL AND TRIM(call_status) != ''")
     if q:
         clauses.append(
-            "(company LIKE ? OR posted_by LIKE ? OR role LIKE ? OR email LIKE ?)"
+            "(company LIKE ? OR posted_by LIKE ? OR role LIKE ? OR email LIKE ? "
+            "OR location LIKE ? OR tech_stack LIKE ? OR post_text LIKE ?)"
         )
         like = f"%{q}%"
-        params.extend([like, like, like, like])
+        params.extend([like] * 7)
     where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
     # Sort resolution. Two legacy tokens kept working exactly as before:
     #   - "recent": last_seen_at DESC (default)
@@ -271,6 +308,18 @@ def list_leads(
         order_sql = "ORDER BY first_seen_at DESC, id DESC"
 
     with connect() as con:
+        # Lazy snooze sweep — any lead whose remind_at has passed gets
+        # remind_at cleared and needs_attention forced back on, so it
+        # naturally resurfaces in the inbox / leads list. Cheap: indexed
+        # column, runs once per /leads fetch instead of needing a cron.
+        now_iso = dt.datetime.now().isoformat(timespec="seconds")
+        con.execute(
+            "UPDATE leads SET needs_attention = 1, remind_at = NULL "
+            "WHERE remind_at IS NOT NULL AND remind_at <= ?",
+            (now_iso,),
+        )
+        con.commit()
+
         total = con.execute(
             f"SELECT COUNT(*) FROM leads {where}", tuple(params)
         ).fetchone()[0]
@@ -280,7 +329,7 @@ def list_leads(
             f"sent_at, replied_at, needs_attention, call_status, reviewed_at, "
             f"jaydip_note, open_count, first_opened_at, last_opened_at, "
             f"scheduled_send_at, ooo_nudge_at, ooo_nudge_sent_at, "
-            f"fit_score, fit_score_reasons "
+            f"fit_score, fit_score_reasons, remind_at "
             f"FROM leads {where} {order_sql} LIMIT ? OFFSET ?",
             tuple(params) + (limit, offset),
         ).fetchall()
@@ -290,6 +339,23 @@ def list_leads(
         # roundtrip covers the whole page.
         present_clusters = {
             r[0] for r in con.execute("SELECT cluster FROM cvs").fetchall()
+        }
+
+        # Recruiter-spam signal: same posted_by name appearing across
+        # 3+ distinct companies in the last 30d typically means a
+        # third-party recruiter spraying job posts. We compute it once
+        # for the whole page (single GROUP BY) and look it up per row.
+        cutoff_30d = (dt.date.today() - dt.timedelta(days=30)).isoformat()
+        recruiter_names = {
+            r["posted_by"]
+            for r in con.execute(
+                "SELECT posted_by, COUNT(DISTINCT company) AS n_companies "
+                "FROM leads "
+                "WHERE posted_by IS NOT NULL AND TRIM(posted_by) != '' "
+                "  AND DATE(first_seen_at) >= ? "
+                "GROUP BY posted_by HAVING n_companies >= 3",
+                (cutoff_30d,),
+            ).fetchall()
         }
     out: list[dict] = []
     for r in rows:
@@ -305,8 +371,145 @@ def list_leads(
             and effective not in present_clusters
             and d.get("status") in ("New", "Drafted")
         )
+        d["is_recruiter"] = bool(
+            d.get("posted_by") and d["posted_by"] in recruiter_names
+        )
+        d["temperature"] = _lead_temperature(d)
         out.append(d)
     return {"rows": out, "total": total}
+
+
+def _lead_temperature(lead: dict) -> int:
+    """A 0-100 'heat' score per lead. Combines:
+       +30 if a positive reply landed
+       +15 base for any reply
+       +15 if email was opened in the last 7 days
+       +10 if there's any open at all
+       +10 for an explicit yellow/green call_status signal
+       -20 if reviewed_at is set (we already triaged, less urgent)
+       -10 for every 14d since last_seen_at (decay for cold leads)
+       Capped to [0, 100]. Drives the inbox sort order so hot leads
+       float to the top without the user needing to filter manually."""
+    now = dt.datetime.now()
+    score = 0
+    # Reply signal — strongest positive.
+    if lead.get("replied_at"):
+        score += 15
+        sent_pos = (lead.get("sentiment") or "").lower() == "positive" \
+            or lead.get("call_status") == "green"
+        if sent_pos:
+            score += 30
+    # Open signal — recipient at least loaded the pixel.
+    open_count = int(lead.get("open_count") or 0)
+    if open_count > 0:
+        score += 10
+        last_opened = lead.get("last_opened_at")
+        if last_opened:
+            try:
+                age = (now - dt.datetime.fromisoformat(last_opened)).days
+                if age <= 7:
+                    score += 15
+            except ValueError:
+                pass
+    # Manual triage signals from Jaydip.
+    cs = (lead.get("call_status") or "").lower()
+    if cs == "green":
+        score += 20
+    elif cs == "yellow":
+        score += 10
+    elif cs == "red":
+        score -= 25
+    # Bounced/Skipped → cold.
+    if lead.get("status") in ("Bounced", "Skipped"):
+        score -= 50
+    # Already-handled penalty: if Jaydip has reviewed_at stamped, the
+    # lead is less likely to need attention now.
+    if lead.get("reviewed_at"):
+        score -= 20
+    # Recency decay — every 14 days since last_seen_at sheds 10pts so
+    # truly cold rows rank below newer ones with similar signal.
+    last_seen = lead.get("last_seen_at")
+    if last_seen:
+        try:
+            age = (now - dt.datetime.fromisoformat(last_seen)).days
+            score -= (age // 14) * 10
+        except ValueError:
+            pass
+    return max(0, min(100, score))
+
+
+@router.get("/leads/export.csv")
+def export_leads_csv(
+    status: Optional[str] = Query(None),
+    needs_attention: Optional[bool] = Query(None),
+    call_status: Optional[str] = Query(None),
+    q: Optional[str] = Query(None),
+):
+    """Stream the current leads view as CSV. Mirrors the same filters
+    the /leads endpoint accepts so the file always matches what the
+    user sees on the dashboard. No paging — exports the full filtered
+    set so reports stay reproducible."""
+    import csv as _csv
+    from io import StringIO as _SIO
+    clauses: list[str] = []
+    params: list = []
+    if status:
+        clauses.append("status = ?")
+        params.append(status)
+    if needs_attention is not None:
+        clauses.append("needs_attention = ?")
+        params.append(1 if needs_attention else 0)
+    if call_status:
+        cs = call_status.strip().lower()
+        if cs == "none":
+            clauses.append("(call_status IS NULL OR TRIM(call_status) = '')")
+        elif cs in ("green", "yellow", "red"):
+            clauses.append("call_status = ?")
+            params.append(cs)
+        elif cs == "any":
+            clauses.append("call_status IS NOT NULL AND TRIM(call_status) != ''")
+    if q:
+        clauses.append(
+            "(company LIKE ? OR posted_by LIKE ? OR role LIKE ? OR email LIKE ? "
+            "OR location LIKE ? OR tech_stack LIKE ? OR post_text LIKE ?)"
+        )
+        like = f"%{q}%"
+        params.extend([like] * 7)
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+
+    cols = [
+        "id", "post_url", "posted_by", "company", "role", "tech_stack",
+        "location", "email", "phone", "status", "fit_score", "cv_cluster",
+        "first_seen_at", "sent_at", "replied_at", "bounced_at",
+        "call_status", "open_count", "jaydip_note",
+    ]
+
+    def _gen():
+        buf = _SIO()
+        w = _csv.writer(buf)
+        w.writerow(cols)
+        yield buf.getvalue()
+        buf.seek(0); buf.truncate(0)
+        with connect() as con:
+            for r in con.execute(
+                f"SELECT {', '.join(cols)} FROM leads {where} "
+                f"ORDER BY first_seen_at DESC, id DESC",
+                tuple(params),
+            ):
+                w.writerow([r[c] if r[c] is not None else "" for c in cols])
+                yield buf.getvalue()
+                buf.seek(0); buf.truncate(0)
+
+    today = dt.date.today().isoformat()
+    return StreamingResponse(
+        _gen(),
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition":
+                f'attachment; filename="linkedin_leads_{today}.csv"',
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 @router.post("/leads/rescore-all")
@@ -326,9 +529,16 @@ class SafetyPatch(BaseModel):
     safety_mode: Optional[str] = None     # max | normal
     autopilot_enabled: Optional[bool] = None
     autopilot_hour: Optional[int] = Field(default=None, ge=0, le=23)
+    autopilot_minute: Optional[int] = Field(default=None, ge=0, le=59)
+    # 0 or null from the wire means "full cap"; otherwise cap at N.
+    # Using -1 as the explicit "revert to full" sentinel so the client can
+    # toggle between "limited" and "full" without ambiguity.
+    autopilot_count: Optional[int] = Field(default=None, ge=-1, le=500)
     autopilot_tz: Optional[str] = Field(default=None, max_length=64)
     business_hours_only: Optional[bool] = None
     clear_warning_pause: Optional[bool] = None
+    followups_autopilot: Optional[bool] = None
+    followups_hour: Optional[int] = Field(default=None, ge=0, le=23)
 
 
 @router.post("/safety")
@@ -347,6 +557,15 @@ def update_safety(patch: SafetyPatch):
         db_updates["autopilot_enabled"] = 1 if updates["autopilot_enabled"] else 0
     if "autopilot_hour" in updates:
         db_updates["autopilot_hour"] = int(updates["autopilot_hour"])
+    if "autopilot_minute" in updates:
+        db_updates["autopilot_minute"] = int(updates["autopilot_minute"])
+    if "autopilot_count" in updates:
+        raw = updates["autopilot_count"]
+        # -1 from the client is the "revert to full cap" sentinel.
+        if raw is None or int(raw) <= 0:
+            db_updates["autopilot_count"] = None
+        else:
+            db_updates["autopilot_count"] = int(raw)
     if "autopilot_tz" in updates:
         tz = (updates["autopilot_tz"] or "").strip()
         if tz:
@@ -359,6 +578,10 @@ def update_safety(patch: SafetyPatch):
         db_updates["autopilot_tz"] = tz
     if "business_hours_only" in updates:
         db_updates["business_hours_only"] = 1 if updates["business_hours_only"] else 0
+    if "followups_autopilot" in updates:
+        db_updates["followups_autopilot"] = 1 if updates["followups_autopilot"] else 0
+    if "followups_hour" in updates:
+        db_updates["followups_hour"] = int(updates["followups_hour"])
     if updates.get("clear_warning_pause"):
         db_updates["warning_paused_until"] = None
 
@@ -380,6 +603,21 @@ def get_safety() -> SafetyState:
         r = con.execute("SELECT * FROM safety_state WHERE id=1").fetchone()
         if r is None:
             raise HTTPException(500, "safety_state missing")
+        today_iso = dt.date.today().isoformat()
+        ap_row = con.execute(
+            "SELECT fired_at, total_queued, status FROM autopilot_runs "
+            "WHERE fired_date = ? ORDER BY id DESC LIMIT 1",
+            (today_iso,),
+        ).fetchone()
+        today_run = (
+            AutopilotTodayRun(
+                fired_at=ap_row["fired_at"],
+                total_queued=int(ap_row["total_queued"] or 0),
+                status=ap_row["status"],
+            )
+            if ap_row
+            else None
+        )
         return SafetyState(
             daily_sent_count=r["daily_sent_count"],
             daily_sent_date=r["daily_sent_date"],
@@ -388,6 +626,12 @@ def get_safety() -> SafetyState:
             warning_paused_until=r["warning_paused_until"],
             autopilot_enabled=bool(r["autopilot_enabled"]),
             autopilot_hour=r["autopilot_hour"],
+            autopilot_minute=(
+                r["autopilot_minute"] if "autopilot_minute" in r.keys() else 0
+            ) or 0,
+            autopilot_count=(
+                r["autopilot_count"] if "autopilot_count" in r.keys() else None
+            ),
             # Older DBs that pre-date the TZ column will still return None
             # via the keys(); default to empty string so pydantic doesn't
             # 500 until the schema catches up.
@@ -396,7 +640,32 @@ def get_safety() -> SafetyState:
                 r["business_hours_only"] if "business_hours_only" in r.keys() else 0
             ),
             safety_mode=r["safety_mode"],
+            autopilot_today=today_run,
+            followups_autopilot=bool(
+                r["followups_autopilot"] if "followups_autopilot" in r.keys() else 0
+            ),
+            followups_hour=(
+                r["followups_hour"] if "followups_hour" in r.keys() else 11
+            ) or 11,
         )
+
+
+@router.post("/autopilot/reset-today")
+def reset_autopilot_today():
+    """Clear today's autopilot run so the next tick can re-fire the daily
+    batch. Useful when the user changes the scheduled time AFTER the run
+    already happened, or wants to manually re-trigger for the same day."""
+    today_iso = dt.date.today().isoformat()
+    with connect() as con:
+        cur = con.execute(
+            "DELETE FROM autopilot_runs WHERE fired_date = ?", (today_iso,)
+        )
+        deleted = cur.rowcount
+        _log_event(con, "autopilot_reset", meta={"deleted": deleted})
+        con.commit()
+    # Also clear the in-process guard so _autopilot_tick re-evaluates.
+    _autopilot_state["last_fired_date"] = None
+    return {"ok": True, "deleted": deleted}
 
 
 # ---------- extension auth ----------
@@ -843,6 +1112,66 @@ def archive_lead(lead_id: int, payload: ArchiveRequest):
     return {"archived": lead_id, "reason": payload.reason}
 
 
+class BulkLeadIdsBody(BaseModel):
+    ids: list[int] = Field(min_length=1, max_length=500)
+    reason: Optional[str] = None
+
+
+@router.post("/leads/bulk-archive")
+def bulk_archive_leads(payload: BulkLeadIdsBody):
+    """Move N leads to the recyclebin in a single transaction. Silently
+    skips IDs that don't exist so a partial selection doesn't 404 the
+    whole call."""
+    reason = payload.reason or "bulk"
+    archived = 0
+    with connect() as con:
+        for lid in payload.ids:
+            try:
+                _archive_lead(con, lid, reason)
+                archived += 1
+            except HTTPException:
+                continue
+        con.commit()
+    return {"archived": archived, "requested": len(payload.ids)}
+
+
+class BulkSnoozeBody(BaseModel):
+    ids: list[int] = Field(min_length=1, max_length=500)
+    remind_at: str = Field(min_length=2, max_length=40)
+
+
+@router.post("/leads/bulk-snooze")
+def bulk_snooze_leads(payload: BulkSnoozeBody):
+    raw = payload.remind_at.strip()
+    if len(raw) <= 5 and raw[-1] in ("h", "d", "w") and raw[:-1].isdigit():
+        n = int(raw[:-1])
+        delta = {"h": dt.timedelta(hours=n),
+                 "d": dt.timedelta(days=n),
+                 "w": dt.timedelta(weeks=n)}[raw[-1]]
+        parsed = dt.datetime.now() + delta
+    else:
+        try:
+            parsed = dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            raise HTTPException(400, "remind_at must be ISO-8601 or '<n>h|d|w'")
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone().replace(tzinfo=None)
+    if parsed <= dt.datetime.now():
+        raise HTTPException(400, "remind_at must be in the future")
+    when = parsed.isoformat(timespec="seconds")
+    with connect() as con:
+        placeholders = ",".join("?" * len(payload.ids))
+        cur = con.execute(
+            f"UPDATE leads SET remind_at = ?, needs_attention = 0 "
+            f"WHERE id IN ({placeholders})",
+            (when, *payload.ids),
+        )
+        _log_event(con, "bulk_snooze",
+                   meta={"count": cur.rowcount, "remind_at": when})
+        con.commit()
+    return {"snoozed": cur.rowcount, "remind_at": when}
+
+
 @router.post("/leads/{lead_id}/restore")
 def restore_lead(lead_id: int):
     """Restore from recyclebin. `lead_id` here is the recyclebin row id."""
@@ -1011,12 +1340,33 @@ class DraftBatchIn(BaseModel):
     max: int = Field(default=100, ge=1, le=500)
 
 
+_batch_context_lock = threading.Lock()
+_batch_context: dict = {
+    # Rolling list of the last ~6 drafts (compact variety dicts). Appended
+    # to as each worker completes; read before each call so a parallel
+    # worker can still benefit from peers that finished while it was
+    # waiting.
+    "prior_drafts": [],
+    "prior_plans": [],
+    # Cached outreach-stats snapshot for this batch. Recomputed on batch
+    # start so the drafter doesn't pay the query cost per lead.
+    "stats": None,
+}
+
+
 def _generate_one(lead_id: int) -> str:
     """Generate and persist one lead's draft. Returns 'drafted' | 'skipped' | 'failed'."""
     with connect() as con:
         row = con.execute("SELECT * FROM leads WHERE id = ?", (lead_id,)).fetchone()
     if row is None or row["status"] != "New":
         return "skipped"
+
+    # Snapshot the shared batch context so concurrent writers don't surprise
+    # us mid-call. Read-copy is fine — we never mutate these lists in place.
+    with _batch_context_lock:
+        prior_drafts = list(_batch_context["prior_drafts"])
+        prior_plans = list(_batch_context["prior_plans"])
+        stats = _batch_context["stats"]
 
     try:
         result = _claude_generate(
@@ -1026,6 +1376,9 @@ def _generate_one(lead_id: int) -> str:
             tech_stack=row["tech_stack"] or "",
             location=row["location"] or "",
             post_text=row["post_text"] or "",
+            prior_drafts=prior_drafts,
+            prior_plans=prior_plans,
+            stats=stats,
         )
     except BridgeUnreachable as e:
         # Bridge dropped mid-batch. Leave the lead at status=New and bubble
@@ -1084,7 +1437,18 @@ def _generate_one(lead_id: int) -> str:
         _log_event(con, "draft", lead_id=lead_id,
                    meta={"mode": result.email_mode, "cv": result.cv_cluster})
         con.commit()
-        return "drafted"
+
+    # Record this draft into the batch-shared context so subsequent workers
+    # in the same batch see it and explicitly vary their hook/opening/case
+    # study. Bounded ring — we only need the last ~6 for Claude's context.
+    with _batch_context_lock:
+        _batch_context["prior_drafts"].append(draft_variety_key(result))
+        _batch_context["prior_drafts"] = _batch_context["prior_drafts"][-6:]
+        if result.plan:
+            _batch_context["prior_plans"].append(result.plan)
+            _batch_context["prior_plans"] = _batch_context["prior_plans"][-6:]
+
+    return "drafted"
 
 
 def _drafts_worker(lead_ids: list[int]) -> None:
@@ -1157,6 +1521,17 @@ def generate_drafts_batch(payload: DraftBatchIn):
             "finished_at": None,
             "last_error": None,
         })
+        # Fresh batch → wipe the rolling variety window and seed the stats
+        # snapshot once so every worker shares the same "avoid" hints.
+        # Stats failure is silently ignored — empty hints just means the
+        # drafter falls back to rule-only guidance.
+        with _batch_context_lock:
+            _batch_context["prior_drafts"] = []
+            _batch_context["prior_plans"] = []
+            try:
+                _batch_context["stats"] = extras.outreach_stats()
+            except Exception:
+                _batch_context["stats"] = None
         threading.Thread(target=_drafts_worker, args=(lead_ids,), daemon=True).start()
 
     return {"started": True, "total": len(lead_ids)}
@@ -1358,17 +1733,29 @@ def gmail_test(account_id: Optional[int] = None):
 
 
 def _effective_daily_cap(con) -> int:
-    """Global cap = sum of active Gmail account caps (bounded below by DAILY_CAP).
+    """Global cap = sum of active Gmail accounts' warmup-aware effective caps,
+    bounded below by DAILY_CAP.
 
-    Previously this was a hardcoded DAILY_CAP=20 which silently overrode
-    per-account cap settings. Now we derive it from live account config so
-    raising a single account's cap to 25 actually lets 25 sends through.
+    Previously this summed raw daily_cap and ignored the warmup curve, so a
+    fresh account at daily_cap=25 contributed 25 to the global cap even
+    though the picker would only let 15 through while it ramped. That
+    caused the safety rail to allow more sends than the per-account caps
+    could absorb, stalling batches mid-flight. Using effective_cap keeps
+    both numbers in agreement.
     """
-    row = con.execute(
-        "SELECT COALESCE(SUM(daily_cap), 0) AS total "
+    rows = con.execute(
+        "SELECT daily_cap, warmup_enabled, warmup_start_date, connected_at "
         "FROM gmail_accounts WHERE status = 'active'"
-    ).fetchone()
-    total = int(row["total"] or 0) if row else 0
+    ).fetchall()
+    curve = gmail.get_warmup_curve()
+    total = 0
+    for r in rows:
+        total += gmail.effective_cap(
+            int(r["daily_cap"]),
+            bool(r["warmup_enabled"]),
+            r["warmup_start_date"] or r["connected_at"],
+            curve=curve,
+        )
     return max(DAILY_CAP, total)
 
 
@@ -1550,7 +1937,26 @@ def download_extension():
     )
 
 
-def _tracking_pixel_url(token: str) -> str:
+def _tracking_is_public() -> bool:
+    """Pixel is only embedded when TRACKING_BASE_URL points at a host the
+    recipient's mail client can actually reach. Localhost / 127.* / RFC1918
+    addresses never will, so we skip the pixel entirely in dev to avoid
+    shipping a broken <img> tag (which is both useless and a minor spam
+    signal). Set LINKEDIN_TRACKING_BASE_URL to your public tunnel / domain
+    before sending real mail if you want open tracking."""
+    host = TRACKING_BASE_URL.lower()
+    if not host.startswith(("http://", "https://")):
+        return False
+    bad = ("localhost", "127.0.0.1", "0.0.0.0", "::1",
+           "10.", "192.168.", "172.16.", "172.17.", "172.18.", "172.19.",
+           "172.2", "172.30.", "172.31.")
+    stripped = host.split("://", 1)[1].split("/", 1)[0].split(":", 1)[0]
+    return not any(stripped == b or stripped.startswith(b) for b in bad)
+
+
+def _tracking_pixel_url(token: str) -> str | None:
+    if not _tracking_is_public():
+        return None
     return f"{TRACKING_BASE_URL}/api/linkedin/t/open/{token}.gif"
 
 
@@ -1583,10 +1989,22 @@ def _record_failure(con, lead_id: int, err: str) -> None:
 
 @router.get("/leads/{lead_id:int}/replies")
 def list_lead_replies(lead_id: int):
-    """Return all inbound replies for a lead + original outgoing context
-    needed to draft/send a threaded response. Also resolves which of our
-    Gmail accounts received the reply (same account that sent the initial
-    mail — Gmail threads it back)."""
+    """Return the full conversation thread for a lead — original outbound
+    + every inbound reply + every outbound reply Jaydip has sent — merged
+    chronologically so the drawer can render the back-and-forth as a real
+    thread instead of stacking duplicate "Received reply (N)" boxes.
+
+    Shape:
+      - lead:    metadata (email, sent_message_id, received_on_email, ...)
+      - replies: legacy inbound-only list (kept so older callers/tests
+                 don't break — the drawer now consumes `thread` instead).
+      - thread:  merged conversation — each entry has direction:
+                   "out_initial"  the cold email we first sent
+                   "in"           an inbound reply (real or auto)
+                   "out_reply"    a reply Jaydip later sent in-thread
+                 Sorted by `at` ascending so a forward render = oldest
+                 message first (matches Gmail/most chat UIs).
+    """
     with connect() as con:
         lead = con.execute(
             "SELECT id, email, posted_by, company, role, gen_subject, "
@@ -1604,16 +2022,66 @@ def list_lead_replies(lead_id: int):
             received_on = acct["email"] if acct else None
         reps = con.execute(
             "SELECT id, gmail_msg_id, from_email, subject, snippet, body, "
-            "received_at, kind, handled_at, sentiment, "
+            "received_at, kind, handled_at, sentiment, intent, "
             "auto_draft_body, auto_draft_at "
             "FROM replies WHERE lead_id = ? ORDER BY received_at ASC",
             (lead_id,),
         ).fetchall()
+        # Outbound replies Jaydip has already sent in-thread — pulled
+        # from the events log where send-reply persists `outbound_body`.
+        sent_replies = con.execute(
+            "SELECT at, meta_json FROM events "
+            "WHERE lead_id = ? AND kind = 'reply_sent' "
+            "ORDER BY at ASC",
+            (lead_id,),
+        ).fetchall()
+
     lead_out = dict(lead)
     lead_out["received_on_email"] = received_on
+
+    # Build the merged thread.
+    thread: list[dict] = []
+    if lead["sent_at"] and lead["gen_body"]:
+        thread.append({
+            "direction": "out_initial",
+            "at": lead["sent_at"],
+            "subject": lead["gen_subject"],
+            "body": lead["gen_body"],
+        })
+    for r in reps:
+        thread.append({
+            "direction": "in",
+            "id": r["id"],
+            "at": r["received_at"],
+            "from_email": r["from_email"],
+            "subject": r["subject"],
+            "body": r["body"] or r["snippet"],
+            "kind": r["kind"],
+            "sentiment": r["sentiment"],
+            "intent": (r["intent"] if "intent" in r.keys() else None),
+            "handled_at": r["handled_at"],
+            "auto_draft_body": r["auto_draft_body"],
+            "auto_draft_at": r["auto_draft_at"],
+        })
+    for sr in sent_replies:
+        try:
+            meta = json.loads(sr["meta_json"] or "{}")
+        except Exception:
+            meta = {}
+        body = meta.get("outbound_body") or ""
+        if not body:
+            continue
+        thread.append({
+            "direction": "out_reply",
+            "at": sr["at"],
+            "body": body,
+        })
+    thread.sort(key=lambda x: x.get("at") or "")
+
     return {
         "lead": lead_out,
         "replies": [dict(r) for r in reps],
+        "thread": thread,
     }
 
 
@@ -1902,6 +2370,66 @@ def unschedule_send(lead_id: int):
         if cur.rowcount == 0:
             raise HTTPException(404, "Lead has no schedule")
         _log_event(con, "unscheduled", lead_id=lead_id)
+        con.commit()
+    return {"ok": True}
+
+
+class SnoozeBody(BaseModel):
+    # ISO timestamp OR a relative hint like "1d" / "3d" / "1w"
+    remind_at: str = Field(min_length=2, max_length=40)
+
+
+@router.post("/leads/{lead_id:int}/snooze")
+def snooze_lead(lead_id: int, payload: SnoozeBody):
+    """Hide a lead from the 'needs attention' queue until remind_at.
+    Accepts either ISO-8601 or a relative token: '1d', '3d', '1w', '2h'.
+    Lazy sweep in /leads clears remind_at and re-flags needs_attention
+    once the timestamp passes."""
+    raw = payload.remind_at.strip()
+    parsed: dt.datetime | None = None
+    # Relative: <n><unit>  where unit in h/d/w
+    if len(raw) <= 5 and raw[-1] in ("h", "d", "w") and raw[:-1].isdigit():
+        n = int(raw[:-1])
+        delta = {"h": dt.timedelta(hours=n),
+                 "d": dt.timedelta(days=n),
+                 "w": dt.timedelta(weeks=n)}[raw[-1]]
+        parsed = dt.datetime.now() + delta
+    else:
+        try:
+            parsed = dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            raise HTTPException(400, "remind_at must be ISO-8601 or '<n>h|d|w'")
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone().replace(tzinfo=None)
+    if parsed <= dt.datetime.now():
+        raise HTTPException(400, "remind_at must be in the future")
+    when = parsed.isoformat(timespec="seconds")
+    with connect() as con:
+        row = con.execute(
+            "SELECT id FROM leads WHERE id = ?", (lead_id,),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(404, "Lead not found")
+        con.execute(
+            "UPDATE leads SET remind_at = ?, needs_attention = 0 WHERE id = ?",
+            (when, lead_id),
+        )
+        _log_event(con, "snoozed", lead_id=lead_id, meta={"remind_at": when})
+        con.commit()
+    return {"ok": True, "remind_at": when}
+
+
+@router.post("/leads/{lead_id:int}/unsnooze")
+def unsnooze_lead(lead_id: int):
+    with connect() as con:
+        cur = con.execute(
+            "UPDATE leads SET remind_at = NULL, needs_attention = 1 "
+            "WHERE id = ? AND remind_at IS NOT NULL",
+            (lead_id,),
+        )
+        if cur.rowcount == 0:
+            raise HTTPException(404, "Lead is not snoozed")
+        _log_event(con, "unsnoozed", lead_id=lead_id)
         con.commit()
     return {"ok": True}
 
@@ -2388,6 +2916,146 @@ def batch_stop():
     return {"stopped": True}
 
 
+# ---------- daily digest (runs from main.py loop at 9am local) ----------
+
+_digest_state = {"sent_date": None}
+
+
+def _digest_already_sent(date_iso: str) -> bool:
+    """Helper used by linkedin_extras.run_digest to short-circuit a
+    duplicate send within the same day. Module-level state means the
+    process restart re-allows one send (fine — preserves the "you got
+    a digest after a crash" signal)."""
+    return _digest_state["sent_date"] == date_iso
+
+
+def _mark_digest_sent(date_iso: str) -> None:
+    _digest_state["sent_date"] = date_iso
+
+
+_followups_state = {"last_run_date": None}
+
+
+def _followups_tick() -> None:
+    """Once-per-day auto follow-up sender. Reads safety_state for the
+    on/off switch and the local hour to fire at. Bounded by the same
+    safety rails as manual sends — quota, cooldowns, blocklist all
+    enforced in run_followups -> send_email."""
+    with connect() as con:
+        s = con.execute(
+            "SELECT followups_autopilot, followups_hour FROM safety_state WHERE id=1"
+        ).fetchone()
+    if not s or not s["followups_autopilot"]:
+        return
+    now = dt.datetime.now()
+    if now.hour < int(s["followups_hour"] or 11):
+        return
+    today = now.date().isoformat()
+    if _followups_state["last_run_date"] == today:
+        return
+    try:
+        import linkedin_extras as _extras
+        result = _extras.run_followups(_extras.FollowupRunIn(dry_run=False))
+        with connect() as con:
+            _log_event(con, "followups_autopilot_run", meta={
+                "sent": result.get("sent", 0),
+                "skipped": result.get("skipped", 0),
+                "errors": len(result.get("errors", []) or []),
+            })
+            con.commit()
+    except HTTPException:
+        # Gmail not connected, blocked by safety, etc — log via the
+        # extras path that already records skips. Mark date so we don't
+        # spam retries every minute.
+        pass
+    except Exception:
+        # Any other failure: don't mark sent so we'll retry next tick.
+        return
+    _followups_state["last_run_date"] = today
+
+
+def _digest_tick() -> None:
+    """Fire the daily digest once per day at/after 9am local. Called by
+    the linkedin_poll_loop in main.py. The tick itself is idempotent
+    (run_digest checks _digest_already_sent), so even at minute-1
+    precision we never double-fire."""
+    now = dt.datetime.now()
+    if now.hour < 9:
+        return
+    today = now.date().isoformat()
+    if _digest_state["sent_date"] == today:
+        return
+    try:
+        # Lazy import — extras imports linkedin_api at module level, so
+        # a top-level import here would create a circular dependency.
+        import linkedin_extras
+        linkedin_extras.run_digest(force=False)
+    except HTTPException as e:
+        # 503 means "no recipient yet" (no Gmail connected) — that's a
+        # user-config gap, not a code bug. Mark date so we don't keep
+        # retrying every minute.
+        if e.status_code == 503:
+            _digest_state["sent_date"] = today
+    except Exception:
+        # Any other failure: don't mark sent so we'll retry next tick.
+        pass
+
+
+# ---------- stale-draft sweep (runs hourly via main.py loop) ----------
+
+# How many days of "Drafted, never sent, never scheduled" before we move
+# the lead to the recyclebin. 14d is the right side of conservative — most
+# real prospects don't sit drafted that long, and if they did the post
+# context is stale enough that the email reads dated.
+STALE_DRAFT_DAYS = 14
+
+_stale_sweep_state = {"last_run_date": None}
+
+
+def _stale_drafts_sweep() -> int:
+    """Archive Drafted leads that have been idle for >STALE_DRAFT_DAYS.
+
+    Idle = `events.draft` event timestamp older than the threshold AND no
+    schedule pending AND no manual review touch (jaydip_note empty,
+    reviewed_at NULL). Anything the user has actively touched stays put;
+    only the truly forgotten rows get swept.
+
+    Idempotent and bounded — designed for an hourly tick. Returns the
+    number of leads moved this run, mostly for log visibility."""
+    today = dt.date.today().isoformat()
+    if _stale_sweep_state["last_run_date"] == today:
+        return 0
+    cutoff = (dt.date.today() - dt.timedelta(days=STALE_DRAFT_DAYS)).isoformat()
+    moved = 0
+    with connect() as con:
+        rows = con.execute(
+            "SELECT l.id "
+            "FROM leads l "
+            "WHERE l.status = 'Drafted' "
+            "  AND l.scheduled_send_at IS NULL "
+            "  AND COALESCE(l.reviewed_at, '') = '' "
+            "  AND COALESCE(l.jaydip_note, '') = '' "
+            "  AND ( "
+            "    SELECT COALESCE(MAX(e.at), l.first_seen_at) "
+            "    FROM events e "
+            "    WHERE e.lead_id = l.id AND e.kind = 'draft' "
+            "  ) < ? ",
+            (cutoff,),
+        ).fetchall()
+        for r in rows:
+            try:
+                _archive_lead(con, r["id"], reason=f"auto_stale_draft_{STALE_DRAFT_DAYS}d")
+                moved += 1
+            except HTTPException:
+                continue
+        if moved:
+            _log_event(con, "stale_drafts_sweep",
+                       meta={"archived": moved, "cutoff_days": STALE_DRAFT_DAYS})
+        con.commit()
+    _stale_sweep_state["last_run_date"] = today
+    return moved
+
+
 # ---------- autopilot tick (called by main.py scheduler) ----------
 
 _autopilot_state = {"last_fired_date": None}
@@ -2398,7 +3066,8 @@ def _autopilot_tick() -> None:
     hour, fires one batch for the day. Safe to call every minute."""
     with connect() as con:
         s = con.execute(
-            "SELECT autopilot_enabled, autopilot_hour, autopilot_tz "
+            "SELECT autopilot_enabled, autopilot_hour, autopilot_minute, "
+            "autopilot_count, autopilot_tz "
             "FROM safety_state WHERE id=1"
         ).fetchone()
     if not s or not s["autopilot_enabled"]:
@@ -2418,7 +3087,10 @@ def _autopilot_tick() -> None:
     today = now.date().isoformat()
     if _autopilot_state["last_fired_date"] == today:
         return
-    if now.hour < int(s["autopilot_hour"]):
+    # Compare as (hour, minute) so a 4:30 PM target doesn't fire at 4:00.
+    target_min = int(s["autopilot_hour"]) * 60 + int(s["autopilot_minute"] or 0)
+    now_min = now.hour * 60 + now.minute
+    if now_min < target_min:
         return
     if _batch_state["running"]:
         return
@@ -2428,7 +3100,11 @@ def _autopilot_tick() -> None:
     try:
         with connect() as con:
             cap = _effective_daily_cap(con)
-        resp = send_batch(BatchSendIn(count=cap, source="autopilot"))
+        # If the user asked for a smaller drip (autopilot_count set),
+        # honour it; else fire the full effective cap.
+        limit = int(s["autopilot_count"]) if s["autopilot_count"] else cap
+        count = min(cap, limit)
+        resp = send_batch(BatchSendIn(count=count, source="autopilot"))
         _autopilot_state["last_fired_date"] = today
         with connect() as con:
             con.execute(
@@ -2713,16 +3389,16 @@ def _poll_and_store() -> dict:
             if not lead_id:
                 continue
             counts["matched"] += 1
-            sentiment = linkedin_claude.classify_sentiment(
-                (m.body or m.snippet or "") + "\n" + (m.subject or "")
-            ) if m.kind == "reply" else None
+            classify_text = (m.body or m.snippet or "") + "\n" + (m.subject or "")
+            sentiment = linkedin_claude.classify_sentiment(classify_text) if m.kind == "reply" else None
+            intent = linkedin_claude.classify_intent(classify_text) if m.kind == "reply" else None
             cur = con.execute(
                 "INSERT OR IGNORE INTO replies "
                 "(lead_id, gmail_msg_id, from_email, subject, snippet, body, "
-                "received_at, kind, sentiment) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "received_at, kind, sentiment, intent) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (lead_id, m.message_id, m.from_email, m.subject, m.snippet,
-                 m.body, m.received_at, m.kind, sentiment),
+                 m.body, m.received_at, m.kind, sentiment, intent),
             )
             # rowcount=1 only when a brand new row was inserted (not a
             # dupe). We use this to queue auto-drafts so re-polled old
@@ -2784,16 +3460,22 @@ def _poll_and_store() -> dict:
                                    meta={"send_at": nudge_when.isoformat()})
             elif m.kind == "bounce":
                 counts["bounces"] += 1
+                # Replied wins over Bounced. If a real reply already came
+                # through (e.g. recipient replied from a different alias and
+                # an out-of-date NDR for the original address shows up
+                # later), don't downgrade the lead — Replied is more
+                # informative and downstream filters (/followups,
+                # replied_at timestamp) depend on it.
                 con.execute(
                     "UPDATE leads SET status = 'Bounced', bounced_at = ? "
-                    "WHERE id = ?",
+                    "WHERE id = ? AND status NOT IN ('Replied', 'Bounced')",
                     (m.received_at, lead_id),
                 )
                 # Attribute the bounce back to the sending account so the
                 # auto-pause rail can trip if one inbox is landing
                 # disproportionate bounces.
                 acct_row = con.execute(
-                    "SELECT sent_via_account_id FROM leads WHERE id = ?",
+                    "SELECT sent_via_account_id, email FROM leads WHERE id = ?",
                     (lead_id,),
                 ).fetchone()
                 if acct_row and acct_row["sent_via_account_id"]:
@@ -2801,6 +3483,41 @@ def _poll_and_store() -> dict:
                         gmail.record_bounce(int(acct_row["sent_via_account_id"]))
                     except Exception:
                         pass
+                # Auto-domain-block: if this recipient's domain has now
+                # bounced 2+ times in the last 30 days, add the domain to
+                # the blocklist so future sends / ingests skip it. Cheap
+                # guard — a typo or one-off mailbox issue stays single-
+                # bounce and won't trip this. Recipient email is taken
+                # from the lead row (not the inbound sender, which could
+                # be the MAILER-DAEMON address).
+                recipient = (acct_row["email"] or "").strip().lower() if acct_row else ""
+                domain = recipient.split("@", 1)[1] if "@" in recipient else ""
+                if domain:
+                    bounces_for_domain = con.execute(
+                        "SELECT COUNT(*) FROM leads "
+                        "WHERE LOWER(SUBSTR(email, INSTR(email, '@') + 1)) = ? "
+                        "  AND bounced_at IS NOT NULL "
+                        "  AND DATE(bounced_at) >= DATE('now', '-30 day')",
+                        (domain,),
+                    ).fetchone()[0]
+                    if bounces_for_domain >= 2:
+                        existing = con.execute(
+                            "SELECT 1 FROM blocklist WHERE kind='domain' AND value=?",
+                            (domain,),
+                        ).fetchone()
+                        if not existing:
+                            con.execute(
+                                "INSERT INTO blocklist (kind, value, reason, created_at) "
+                                "VALUES ('domain', ?, 'auto:repeat-bounces', ?)",
+                                (domain, dt.datetime.now().isoformat(timespec="seconds")),
+                            )
+                            _log_event(
+                                con, "auto_blocklist_domain",
+                                lead_id=lead_id,
+                                meta={"domain": domain,
+                                      "bounces_30d": bounces_for_domain,
+                                      "trigger": "repeat_bounces"},
+                            )
             else:
                 counts["auto_replies"] += 1
 

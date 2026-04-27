@@ -1370,7 +1370,14 @@ def _linkedin_poll_loop():
     iteration (~5 min), poll Gmail INBOX for replies/bounces if Gmail is
     connected."""
     import time as _time
-    from linkedin_api import _poll_and_store, _autopilot_tick, _scheduler_tick
+    from linkedin_api import (
+        _poll_and_store,
+        _autopilot_tick,
+        _scheduler_tick,
+        _stale_drafts_sweep,
+        _digest_tick,
+        _followups_tick,
+    )
     from linkedin_gmail import get_credentials as _gmail_creds
     tick = 0
     while True:
@@ -1379,6 +1386,18 @@ def _linkedin_poll_loop():
             _scheduler_tick()
             if tick % 5 == 0 and _gmail_creds() is not None:
                 _poll_and_store()
+            # Stale-draft sweep — once per hour is plenty since the
+            # sweeper itself only does work on a once-a-day basis (it
+            # bails when last_run_date == today).
+            if tick % 60 == 0:
+                _stale_drafts_sweep()
+            # Digest — checked every minute so it fires within ~60s of
+            # 9am sharp. The tick is cheap (one wall-clock comparison)
+            # before bailing.
+            _digest_tick()
+            # Auto follow-ups — same minute-precision check, bails fast
+            # when the toggle is off (default) or the hour hasn't hit.
+            _followups_tick()
         except Exception as e:
             print(f"[linkedin-poll] {e}")
         tick += 1

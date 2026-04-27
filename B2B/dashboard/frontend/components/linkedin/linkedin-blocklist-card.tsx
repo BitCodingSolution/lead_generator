@@ -6,9 +6,11 @@ import { Ban, Plus, Trash2, Loader2 } from "lucide-react"
 import { api, swrFetcher } from "@/lib/api"
 import { cn } from "@/lib/utils"
 
+type BlockKind = "company" | "domain" | "email"
+
 type BlockRow = {
   id: number
-  kind: "company" | "domain"
+  kind: BlockKind
   value: string
   reason: string | null
   created_at: string
@@ -18,13 +20,22 @@ const ENDPOINT = "/api/linkedin/blocklist"
 
 export function LinkedInBlocklistCard() {
   const { data, isLoading } = useSWR<{ rows: BlockRow[] }>(ENDPOINT, swrFetcher)
-  const [kind, setKind] = React.useState<"company" | "domain">("domain")
+  const [kind, setKind] = React.useState<BlockKind>("domain")
   const [value, setValue] = React.useState("")
   const [reason, setReason] = React.useState("")
   const [busy, setBusy] = React.useState(false)
   const [msg, setMsg] = React.useState<string | null>(null)
+  const [filter, setFilter] = React.useState<"all" | "auto" | "manual">("all")
 
-  const rows = data?.rows ?? []
+  const allRows = data?.rows ?? []
+  const rows = allRows.filter((r) => {
+    if (filter === "auto") return (r.reason ?? "").startsWith("auto:")
+    if (filter === "manual") return !(r.reason ?? "").startsWith("auto:")
+    return true
+  })
+  const autoCount = allRows.filter((r) =>
+    (r.reason ?? "").startsWith("auto:"),
+  ).length
 
   async function onAdd(e: React.FormEvent) {
     e.preventDefault()
@@ -69,16 +80,23 @@ export function LinkedInBlocklistCard() {
       <form onSubmit={onAdd} className="grid grid-cols-[100px_1fr_1fr_auto] gap-2 mb-3">
         <select
           value={kind}
-          onChange={(e) => setKind(e.target.value as "company" | "domain")}
+          onChange={(e) => setKind(e.target.value as BlockKind)}
           className="rounded-md border border-zinc-800 bg-zinc-900/60 px-2 py-1.5 text-sm text-zinc-100 focus:outline-none focus:border-[hsl(250_80%_62%)]"
         >
           <option value="domain">Domain</option>
+          <option value="email">Email</option>
           <option value="company">Company</option>
         </select>
         <input
           value={value}
           onChange={(e) => setValue(e.target.value)}
-          placeholder={kind === "domain" ? "upwork.com" : "Deloitte Consulting"}
+          placeholder={
+            kind === "domain"
+              ? "upwork.com"
+              : kind === "email"
+                ? "name@upwork.com"
+                : "Deloitte Consulting"
+          }
           className="rounded-md border border-zinc-800 bg-zinc-900/60 px-3 py-1.5 text-sm text-zinc-100 placeholder:text-zinc-600 font-mono focus:outline-none focus:border-[hsl(250_80%_62%)]"
         />
         <input
@@ -98,10 +116,35 @@ export function LinkedInBlocklistCard() {
       </form>
       {msg && <div className="mb-2 text-[11px] text-rose-300">{msg}</div>}
 
+      {allRows.length > 0 && (
+        <div className="mb-2 flex items-center gap-1 text-[11px]">
+          {(["all", "auto", "manual"] as const).map((k) => (
+            <button
+              key={k}
+              onClick={() => setFilter(k)}
+              className={cn(
+                "rounded px-2 py-0.5 capitalize",
+                filter === k
+                  ? "bg-zinc-700/60 text-zinc-100"
+                  : "text-zinc-500 hover:text-zinc-300",
+              )}
+            >
+              {k}
+              {k === "auto" && autoCount > 0 && (
+                <span className="ml-1 text-amber-400">({autoCount})</span>
+              )}
+            </button>
+          ))}
+        </div>
+      )}
       {isLoading ? (
         <div className="text-xs text-zinc-500">Loading…</div>
       ) : rows.length === 0 ? (
-        <div className="text-xs text-zinc-500">No entries yet.</div>
+        <div className="text-xs text-zinc-500">
+          {filter === "auto"
+            ? "No auto-blocks yet — reply opt-outs land here."
+            : "No entries yet."}
+        </div>
       ) : (
         <div className="divide-y divide-zinc-800/60 max-h-72 overflow-y-auto">
           {rows.map((r) => (
@@ -115,7 +158,9 @@ export function LinkedInBlocklistCard() {
                     "inline-block rounded px-1.5 py-0.5 text-[10px] font-medium uppercase",
                     r.kind === "domain"
                       ? "bg-sky-500/15 text-sky-300"
-                      : "bg-violet-500/15 text-violet-300",
+                      : r.kind === "email"
+                        ? "bg-amber-500/15 text-amber-300"
+                        : "bg-violet-500/15 text-violet-300",
                   )}
                 >
                   {r.kind}
@@ -124,7 +169,14 @@ export function LinkedInBlocklistCard() {
                   {r.value}
                 </span>
                 {r.reason && (
-                  <span className="text-[11px] text-zinc-500 truncate">
+                  <span
+                    className={cn(
+                      "text-[11px] truncate",
+                      r.reason.startsWith("auto:")
+                        ? "text-amber-400/80"
+                        : "text-zinc-500",
+                    )}
+                  >
                     — {r.reason}
                   </span>
                 )}

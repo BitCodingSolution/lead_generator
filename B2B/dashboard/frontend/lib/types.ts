@@ -174,6 +174,17 @@ export type LinkedInLead = {
   // True when cv_cluster points at a specialty slot (ml / ai_llm / python
   // / ...) whose CV PDF is not uploaded yet. Send would 400 — UI warns.
   cv_missing?: boolean
+  // ISO timestamp the lead is snoozed until. Cleared automatically by
+  // the /leads lazy sweep once the time passes.
+  remind_at?: string | null
+  // True when the same posted_by name has hit 3+ distinct companies in
+  // the last 30 days — typical recruiter-spray signal. UI flags it so
+  // Jaydip can decide whether to skip / send a different pitch.
+  is_recruiter?: boolean
+  // 0-100 heat score derived from opens, replies, recency, and call
+  // signals. Drives "Hot" badges and an optional sort-by-temperature
+  // mode in the leads table.
+  temperature?: number
 }
 
 export type LinkedInLeadsResponse = {
@@ -188,6 +199,9 @@ export type LinkedInOverview = {
   queued: number
   sent_today: number
   replied: number
+  /** Inbound replies still awaiting Jaydip's action (handled=0). Drives
+   * the "X pending" sub-line on the Replied KPI card. */
+  replied_pending: number
   bounced: number
   quota_used: number
   quota_cap: number
@@ -205,9 +219,19 @@ export type LinkedInSafety = {
   warning_paused_until: string | null
   autopilot_enabled: boolean
   autopilot_hour: number
+  autopilot_minute: number
+  /** null = send the full effective cap; number caps the daily drip. */
+  autopilot_count: number | null
   autopilot_tz: string
   business_hours_only: boolean
   safety_mode: "max" | "normal"
+  autopilot_today: {
+    fired_at: string
+    total_queued: number
+    status: string
+  } | null
+  followups_autopilot: boolean
+  followups_hour: number
 }
 
 export type LinkedInGmailStatus = {

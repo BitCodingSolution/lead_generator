@@ -9,18 +9,20 @@ import { LinkedInMaintenance } from "@/components/linkedin/linkedin-maintenance"
 import { LinkedInAutopilotStatus } from "@/components/linkedin/linkedin-autopilot-status"
 import { LinkedInBlocklistCard } from "@/components/linkedin/linkedin-blocklist-card"
 import { LinkedInCVsCard } from "@/components/linkedin/linkedin-cvs-card"
-import { Puzzle, Mail, Shield, Ban, FileText, Wrench, KeyRound, Download } from "lucide-react"
+import { LinkedInDnsCard } from "@/components/linkedin/linkedin-dns-card"
+import { Puzzle, Mail, Shield, Ban, FileText, Wrench, KeyRound, Download, ShieldCheck } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { api } from "@/lib/api"
 
 type SectionId =
-  | "gmail" | "safety" | "keys" | "blocklist" | "cvs" | "maintenance" | "install"
+  | "gmail" | "safety" | "keys" | "blocklist" | "cvs" | "dns" | "maintenance" | "install"
 
 const SECTIONS: { id: SectionId; label: string; icon: React.ReactNode }[] = [
   { id: "gmail", label: "Gmail", icon: <Mail className="size-3.5" /> },
   { id: "safety", label: "Safety & Autopilot", icon: <Shield className="size-3.5" /> },
   { id: "cvs", label: "CV library", icon: <FileText className="size-3.5" /> },
   { id: "blocklist", label: "Blocklist", icon: <Ban className="size-3.5" /> },
+  { id: "dns", label: "Domain auth", icon: <ShieldCheck className="size-3.5" /> },
   { id: "keys", label: "Extension keys", icon: <KeyRound className="size-3.5" /> },
   { id: "maintenance", label: "Maintenance", icon: <Wrench className="size-3.5" /> },
   { id: "install", label: "Install", icon: <Puzzle className="size-3.5" /> },
@@ -98,6 +100,10 @@ export default function LinkedInSettingsPage() {
 
       <Section id="blocklist" title="Blocklist">
         <LinkedInBlocklistCard />
+      </Section>
+
+      <Section id="dns" title="Domain authentication">
+        <LinkedInDnsCard />
       </Section>
 
       <Section id="keys" title="Extension keys">

@@ -21,6 +21,7 @@ const pasteReplyBtn = document.getElementById("pasteReplyBtn");
 const copyReplyBtn = document.getElementById("copyReplyBtn");
 const regenerateBtn = document.getElementById("regenerateBtn");
 const replyPasteStatus = document.getElementById("replyPasteStatus");
+const replyInstruction = document.getElementById("replyInstruction");
 
 // Settings tab
 const apiKeyInput = document.getElementById("apiKeyInput");
@@ -249,6 +250,18 @@ function setBridgeHealth(state, msg) {
 
 generateReplyBtn.addEventListener("click", () => generateReply(false));
 regenerateBtn.addEventListener("click", () => generateReply(true));
+
+// Persist the custom instruction across side-panel reopens so it isn't
+// lost on accidental close. Cleared explicitly only on tab switch or
+// after a successful Paste.
+if (replyInstruction) {
+  chrome.storage.local.get(["replyInstructionDraft"], (d) => {
+    if (d.replyInstructionDraft) replyInstruction.value = d.replyInstructionDraft;
+  });
+  replyInstruction.addEventListener("input", () => {
+    chrome.storage.local.set({ replyInstructionDraft: replyInstruction.value });
+  });
+}
 pasteReplyBtn.addEventListener("click", pasteReplyIntoLinkedIn);
 
 copyReplyBtn.addEventListener("click", () => {
@@ -270,8 +283,13 @@ async function generateReply(isRegenerate) {
   generateReplyBtn.disabled = true;
   if (!isRegenerate) replyPreview.style.display = "none";
 
+  const userInstruction = (replyInstruction?.value || "").trim();
+
   try {
-    const resp = await chrome.runtime.sendMessage({ type: "GENERATE_REPLY" });
+    const resp = await chrome.runtime.sendMessage({
+      type: "GENERATE_REPLY",
+      userInstruction,
+    });
     if (!resp || !resp.ok) {
       setReplyStatus(`Error: ${(resp && resp.error) || "unknown"}`, true);
       return;
@@ -335,6 +353,7 @@ async function refineReply(refineType) {
       type: "REFINE_REPLY",
       refineType,
       currentReply: currentText,
+      userInstruction: (replyInstruction?.value || "").trim(),
     });
 
     if (!resp || !resp.ok) {
@@ -380,6 +399,10 @@ async function pasteReplyIntoLinkedIn() {
     });
     if (resp && resp.ok) {
       replyPasteStatus.textContent = "✓ Pasted. Review and click Send in LinkedIn.";
+      if (replyInstruction) {
+        replyInstruction.value = "";
+        chrome.storage.local.remove("replyInstructionDraft");
+      }
     } else {
       replyPasteStatus.textContent = `Error: ${(resp && resp.error) || "unknown"}`;
       replyPasteStatus.classList.add("error");

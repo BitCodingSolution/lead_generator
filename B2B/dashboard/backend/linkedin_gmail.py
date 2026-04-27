@@ -213,6 +213,24 @@ def list_accounts() -> list[dict]:
         ).fetchall()
     curve = get_warmup_curve()
     out = []
+    with connect() as con:
+        # Per-account health inputs. 30-day window keeps the signal fresh
+        # without a brand-new account looking permanently bad after one
+        # early bounce. Reply count is informational — we don't penalise
+        # for low replies because that mostly reflects deliverability,
+        # not account health.
+        health_rows = con.execute(
+            "SELECT sent_via_account_id AS aid, "
+            "       COUNT(*) AS sent30, "
+            "       SUM(CASE WHEN replied_at IS NOT NULL THEN 1 ELSE 0 END) AS replied30, "
+            "       SUM(CASE WHEN bounced_at IS NOT NULL THEN 1 ELSE 0 END) AS bounced30 "
+            "FROM leads "
+            "WHERE sent_via_account_id IS NOT NULL "
+            "  AND sent_at IS NOT NULL "
+            "  AND DATE(sent_at) >= DATE('now', '-30 day') "
+            "GROUP BY sent_via_account_id"
+        ).fetchall()
+        health_by_id = {int(h["aid"]): dict(h) for h in health_rows}
     for r in rows:
         d = dict(r)
         start = d.get("warmup_start_date") or d.get("connected_at")
@@ -223,6 +241,30 @@ def list_accounts() -> list[dict]:
             start,
             curve=curve,
         )
+        # Health score: 100 minus deductions for bounce rate, consecutive
+        # failures, today's bounces, and paused state. Cheap to compute
+        # and easy to reason about — a single number the UI colour-codes.
+        h = health_by_id.get(int(d["id"]), {})
+        sent30 = int(h.get("sent30", 0) or 0)
+        bounced30 = int(h.get("bounced30", 0) or 0)
+        bounce_rate = (bounced30 / sent30) if sent30 else 0.0
+        score = 100
+        if sent30 >= 5:
+            # 1% bounce rate == 3 points; 5% == 15. Only apply once we
+            # have enough volume to trust the rate.
+            score -= int(min(60, bounce_rate * 300))
+        score -= int(min(20, int(d.get("consecutive_failures") or 0) * 5))
+        score -= int(min(20, int(d.get("bounce_count_today") or 0) * 10))
+        if d.get("status") == "paused":
+            score -= 30
+        score = max(0, min(100, score))
+        d["health_score"] = score
+        d["health_30d"] = {
+            "sent": sent30,
+            "replied": int(h.get("replied30", 0) or 0),
+            "bounced": bounced30,
+            "bounce_rate_pct": round(bounce_rate * 100, 1),
+        }
         out.append(d)
     return out
 
@@ -760,18 +802,19 @@ _AUTOREPLY_SUBJECT_RE = re.compile(
 
 
 def _classify(from_email: str, subject: str, headers: dict) -> str:
+    # Order matters: NDRs (mailer-daemon / postmaster) almost always carry
+    # an "Auto-Submitted: auto-replied" header too. Check the bounce sender
+    # FIRST so we don't misclassify hard bounces as plain auto-replies.
+    if _BOUNCE_SENDERS_RE.search(from_email or ""):
+        return "bounce"
+    if "X-Failed-Recipients" in headers:
+        return "bounce"
     if "auto-submitted" in {k.lower() for k in headers}:
         auto = str(headers.get("Auto-Submitted", "")).lower()
         if "auto-replied" in auto or "auto-generated" in auto:
             return "auto_reply"
-    if _BOUNCE_SENDERS_RE.search(from_email or ""):
-        return "bounce"
-    if "X-Failed-Recipients" in headers or "X-Autoreply" in headers:
-        return (
-            "bounce"
-            if "X-Failed-Recipients" in headers
-            else "auto_reply"
-        )
+    if "X-Autoreply" in headers:
+        return "auto_reply"
     if _AUTOREPLY_SUBJECT_RE.search(subject or ""):
         return "auto_reply"
     return "reply"

@@ -45,6 +45,62 @@ export function LinkedInLeadsTable({
   const [debounced, setDebounced] = React.useState("")
   const [openId, setOpenId] = React.useState<number | null>(null)
   const [sendingId, setSendingId] = React.useState<number | null>(null)
+  const [selected, setSelected] = React.useState<Set<number>>(new Set())
+  const [bulkBusy, setBulkBusy] = React.useState(false)
+
+  function toggleSelect(id: number, e: React.MouseEvent) {
+    e.stopPropagation()
+    setSelected((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  function toggleSelectAll(rowIds: number[]) {
+    setSelected((prev) => {
+      const allSelected = rowIds.every((id) => prev.has(id))
+      const next = new Set(prev)
+      if (allSelected) {
+        rowIds.forEach((id) => next.delete(id))
+      } else {
+        rowIds.forEach((id) => next.add(id))
+      }
+      return next
+    })
+  }
+
+  async function bulkArchive() {
+    const ids = Array.from(selected)
+    if (!ids.length) return
+    if (!confirm(`Move ${ids.length} lead${ids.length === 1 ? "" : "s"} to recyclebin?`)) return
+    setBulkBusy(true)
+    try {
+      await api.post("/api/linkedin/leads/bulk-archive", { ids, reason: "bulk-manual" })
+      setSelected(new Set())
+      mutate((k) => typeof k === "string" && k.startsWith("/api/linkedin/"))
+    } catch (err) {
+      alert((err as Error).message)
+    } finally {
+      setBulkBusy(false)
+    }
+  }
+
+  async function bulkSnooze(token: string) {
+    const ids = Array.from(selected)
+    if (!ids.length) return
+    setBulkBusy(true)
+    try {
+      await api.post("/api/linkedin/leads/bulk-snooze", { ids, remind_at: token })
+      setSelected(new Set())
+      mutate((k) => typeof k === "string" && k.startsWith("/api/linkedin/"))
+    } catch (err) {
+      alert((err as Error).message)
+    } finally {
+      setBulkBusy(false)
+    }
+  }
 
   async function quickSend(e: React.MouseEvent, lead: LinkedInLead) {
     e.stopPropagation()
@@ -115,7 +171,7 @@ export function LinkedInLeadsTable({
           <input
             value={q}
             onChange={(e) => setQ(e.target.value)}
-            placeholder="Search company, role, email..."
+            placeholder="Search company, role, city, tech, email..."
             className="w-full rounded-md border border-zinc-800 bg-zinc-900/60 pl-8 pr-3 py-1.5 text-sm text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-[hsl(250_80%_62%)]"
           />
         </div>
@@ -164,8 +220,27 @@ export function LinkedInLeadsTable({
             </option>
           )}
         </select>
-        <div className="ml-auto text-xs text-zinc-500 tnum">
-          {isLoading ? "…" : `${data?.total ?? 0} rows`}
+        <div className="ml-auto flex items-center gap-2">
+          {/* Mirror the live filters in the URL the export endpoint hits
+              so the downloaded CSV matches whatever the user is currently
+              seeing (status / call / search). */}
+          <a
+            href={`${api.base}/api/linkedin/leads/export.csv?${(() => {
+              const p = new URLSearchParams()
+              if (status) p.set("status", status)
+              if (callFilter) p.set("call_status", callFilter)
+              if (debounced) p.set("q", debounced)
+              return p.toString()
+            })()}`}
+            download={`linkedin_leads_${new Date().toISOString().slice(0, 10)}.csv`}
+            className="inline-flex items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-800/60 px-2.5 py-1 text-xs text-zinc-200 hover:bg-zinc-800"
+            title="Export the current filtered view to CSV"
+          >
+            ⬇ CSV
+          </a>
+          <span className="text-xs text-zinc-500 tnum">
+            {isLoading ? "…" : `${data?.total ?? 0} rows`}
+          </span>
         </div>
       </div>
 
@@ -176,6 +251,21 @@ export function LinkedInLeadsTable({
           <table className="w-full text-sm">
             <thead>
               <tr className="text-left text-[11px] uppercase tracking-[0.08em] text-zinc-500 border-b border-zinc-800/70">
+                <th className="w-8 pl-3 py-2">
+                  <input
+                    type="checkbox"
+                    className="size-3.5 accent-[hsl(250_80%_62%)] cursor-pointer"
+                    checked={rows.length > 0 && rows.every((r) => selected.has(r.id))}
+                    ref={(el) => {
+                      if (!el) return
+                      const any = rows.some((r) => selected.has(r.id))
+                      const all = rows.length > 0 && rows.every((r) => selected.has(r.id))
+                      el.indeterminate = any && !all
+                    }}
+                    onChange={() => toggleSelectAll(rows.map((r) => r.id))}
+                    onClick={(e) => e.stopPropagation()}
+                  />
+                </th>
                 <Th sortKey="fit"        active={sort} onSort={cycleSort} icon={sortIcon("fit")}>Fit</Th>
                 <Th sortKey="company"    active={sort} onSort={cycleSort} icon={sortIcon("company")}>Company</Th>
                 <Th sortKey="posted_by"  active={sort} onSort={cycleSort} icon={sortIcon("posted_by")}>Posted by</Th>
@@ -197,8 +287,17 @@ export function LinkedInLeadsTable({
                   className={cn(
                     "border-b border-zinc-800/50 hover:bg-zinc-800/40 transition-colors cursor-pointer",
                     r.reviewed_at && "opacity-60",
+                    selected.has(r.id) && "bg-violet-500/10",
                   )}
                 >
+                  <td className="w-8 pl-3 py-2" onClick={(e) => toggleSelect(r.id, e)}>
+                    <input
+                      type="checkbox"
+                      className="size-3.5 accent-[hsl(250_80%_62%)] cursor-pointer"
+                      checked={selected.has(r.id)}
+                      readOnly
+                    />
+                  </td>
                   <Td>
                     <ScorePill score={r.fit_score} reasons={r.fit_score_reasons} />
                   </Td>
@@ -216,7 +315,19 @@ export function LinkedInLeadsTable({
                       )}
                     </div>
                   </Td>
-                  <Td className="text-zinc-400">{r.posted_by || "—"}</Td>
+                  <Td className="text-zinc-400">
+                    <div className="flex items-center gap-1.5">
+                      <span>{r.posted_by || "—"}</span>
+                      {r.is_recruiter && (
+                        <span
+                          className="inline-flex items-center gap-0.5 rounded bg-fuchsia-500/15 px-1 py-0.5 text-[10px] text-fuchsia-300"
+                          title="This person has posted under 3+ different companies in the last 30 days — likely a third-party recruiter"
+                        >
+                          🔁 recruiter
+                        </span>
+                      )}
+                    </div>
+                  </Td>
                   <Td className="text-zinc-400">{r.role || "—"}</Td>
                   <Td className="font-mono text-xs text-zinc-300">
                     {r.email || "—"}
@@ -259,6 +370,19 @@ export function LinkedInLeadsTable({
                         >
                           <FileWarning className="size-2.5" />
                           CV
+                        </span>
+                      )}
+                      {r.temperature != null && r.temperature >= 60 && (
+                        <span
+                          className={cn(
+                            "inline-flex items-center gap-0.5 rounded px-1 py-0.5 text-[10px] font-medium tnum",
+                            r.temperature >= 80
+                              ? "bg-rose-500/20 text-rose-300"
+                              : "bg-orange-500/20 text-orange-300",
+                          )}
+                          title={`Heat score ${r.temperature}/100 — opens, replies, signals combined`}
+                        >
+                          🔥 {r.temperature}
                         </span>
                       )}
                     </div>
@@ -308,6 +432,45 @@ export function LinkedInLeadsTable({
         </div>
       )}
     </div>
+    {selected.size > 0 && (
+      <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-30 flex items-center gap-2 rounded-xl border border-violet-500/40 bg-[#17151e] px-4 py-2.5 shadow-2xl">
+        <span className="text-sm text-violet-200">
+          {selected.size} selected
+        </span>
+        <span className="h-5 w-px bg-zinc-700" />
+        <button
+          onClick={() => bulkSnooze("1d")}
+          disabled={bulkBusy}
+          className="rounded-md border border-zinc-700 bg-zinc-800/60 px-2.5 py-1 text-xs text-zinc-200 hover:bg-zinc-800 disabled:opacity-40"
+          title="Snooze for 1 day"
+        >
+          Snooze 1d
+        </button>
+        <button
+          onClick={() => bulkSnooze("1w")}
+          disabled={bulkBusy}
+          className="rounded-md border border-zinc-700 bg-zinc-800/60 px-2.5 py-1 text-xs text-zinc-200 hover:bg-zinc-800 disabled:opacity-40"
+          title="Snooze for 1 week"
+        >
+          Snooze 1w
+        </button>
+        <button
+          onClick={bulkArchive}
+          disabled={bulkBusy}
+          className="rounded-md border border-rose-500/40 bg-rose-500/15 px-2.5 py-1 text-xs text-rose-200 hover:bg-rose-500/25 disabled:opacity-40"
+        >
+          Archive
+        </button>
+        <span className="h-5 w-px bg-zinc-700" />
+        <button
+          onClick={() => setSelected(new Set())}
+          disabled={bulkBusy}
+          className="text-xs text-zinc-400 hover:text-zinc-200 disabled:opacity-40"
+        >
+          Clear
+        </button>
+      </div>
+    )}
     <LinkedInLeadDrawer leadId={openId} onClose={() => setOpenId(null)} />
     </>
   )

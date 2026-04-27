@@ -717,6 +717,298 @@ def linkedin_analytics(days: int = 30):
     }
 
 
+@router.post("/digest/run")
+def run_digest(force: bool = False):
+    """Build and send Jaydip's daily morning digest. Triggered by the
+    9am scheduler tick (idempotent — only fires once per day) but also
+    callable manually with ?force=1 for testing or a re-send.
+
+    Body summarises the last 24h of activity:
+      - sent / replies / bounces / new leads
+      - top fit-score Drafted lead currently waiting
+      - any pending replies still un-handled
+
+    Recipient comes from env var LINKEDIN_DIGEST_RECIPIENT, falling back
+    to the email of the first connected Gmail account so the default
+    Just Works after the first connect. Returns 503 if Gmail isn't
+    configured yet — the scheduler interprets that as "skip silently"
+    so a missing inbox doesn't spam errors."""
+    import os as _os
+    from linkedin_api import _digest_already_sent, _mark_digest_sent  # type: ignore  # noqa: WPS433
+    today = _now_iso()[:10]
+    if not force and _digest_already_sent(today):
+        return {"sent": False, "reason": "already_sent_today"}
+
+    # Pick recipient: env override, else first Gmail account's email.
+    recipient = _os.environ.get("LINKEDIN_DIGEST_RECIPIENT", "").strip()
+    if not recipient:
+        with connect() as con:
+            row = con.execute(
+                "SELECT email FROM gmail_accounts WHERE status = 'active' "
+                "ORDER BY id ASC LIMIT 1"
+            ).fetchone()
+            recipient = row["email"] if row else ""
+    if not recipient:
+        raise HTTPException(503, "No recipient configured (no Gmail accounts)")
+
+    # Build digest body.
+    yesterday = (dt.datetime.now() - dt.timedelta(days=1)).date().isoformat()
+    today_d = dt.date.today().isoformat()
+    with connect() as con:
+        def _cnt(sql: str, params: tuple = ()) -> int:
+            row = con.execute(sql, params).fetchone()
+            return int(row[0]) if row else 0
+        sent_24h = _cnt(
+            "SELECT COUNT(*) FROM leads WHERE DATE(sent_at) >= ?", (yesterday,))
+        replied_24h = _cnt(
+            "SELECT COUNT(*) FROM leads WHERE DATE(replied_at) >= ?", (yesterday,))
+        bounced_24h = _cnt(
+            "SELECT COUNT(*) FROM leads WHERE DATE(bounced_at) >= ?", (yesterday,))
+        new_24h = _cnt(
+            "SELECT COUNT(*) FROM leads WHERE DATE(first_seen_at) >= ?", (yesterday,))
+        pending_replies = _cnt(
+            "SELECT COUNT(DISTINCT lead_id) FROM replies "
+            "WHERE kind = 'reply' AND handled_at IS NULL")
+        top_lead = con.execute(
+            "SELECT id, posted_by, company, role, fit_score "
+            "FROM leads WHERE status = 'Drafted' AND email IS NOT NULL "
+            "ORDER BY COALESCE(fit_score, -1) DESC, first_seen_at DESC LIMIT 1"
+        ).fetchone()
+
+    lines: list[str] = []
+    lines.append(f"Daily LinkedIn outreach digest - {today_d}")
+    lines.append("")
+    lines.append("Last 24h:")
+    lines.append(f"  Sent:    {sent_24h}")
+    lines.append(f"  Replies: {replied_24h}")
+    lines.append(f"  Bounces: {bounced_24h}")
+    lines.append(f"  New leads ingested: {new_24h}")
+    lines.append("")
+    lines.append(f"Pending action: {pending_replies} repl{'y' if pending_replies == 1 else 'ies'} awaiting your response.")
+    lines.append("")
+    if top_lead:
+        lines.append("Top Drafted lead waiting:")
+        lines.append(
+            f"  {top_lead['posted_by'] or '?'} at {top_lead['company'] or '?'} "
+            f"({top_lead['role'] or '?'}) - fit {top_lead['fit_score'] or '-'}"
+        )
+        lines.append(f"  Open: https://b2b.bitcodingsolutions.com/linkedin/leads")
+        lines.append("")
+    lines.append("Open dashboard: https://b2b.bitcodingsolutions.com/linkedin")
+    body = "\n".join(lines)
+
+    subject = (
+        f"[Outreach] {sent_24h} sent / {replied_24h} replied / "
+        f"{pending_replies} pending - {today_d}"
+    )
+
+    from linkedin_gmail import send_email as _send  # noqa: WPS433
+    try:
+        _send(to=recipient, subject=subject, body=body)
+    except Exception as e:
+        raise HTTPException(502, f"Digest send failed: {e}")
+    _mark_digest_sent(today)
+    return {"sent": True, "to": recipient, "subject": subject}
+
+
+@router.get("/dns/check")
+def dns_check(domain: str):
+    """Best-effort SPF / DKIM / DMARC health check for a sending domain.
+    Lightweight — no auth because the data is read-only and public.
+    Returns per-record: present bool, value string (truncated), and a
+    simple verdict (ok / missing / soft). DKIM lookup is a shallow probe
+    of common selectors since the real selector depends on the provider
+    (Microsoft uses 'selector1' / 'selector2', Google uses 'google')."""
+    import re as _re
+    domain = (domain or "").strip().lower().strip(".")
+    if not _re.match(r"^[a-z0-9.-]+\.[a-z]{2,}$", domain):
+        raise HTTPException(400, "Invalid domain")
+    try:
+        import dns.resolver  # type: ignore
+    except Exception:
+        raise HTTPException(500, "dnspython not installed on server")
+
+    resolver = dns.resolver.Resolver()
+    resolver.lifetime = 4.0
+    resolver.timeout = 2.0
+
+    def _txt(name: str) -> list[str]:
+        try:
+            ans = resolver.resolve(name, "TXT")
+            out: list[str] = []
+            for rr in ans:
+                # Each TXT rdata is a tuple of byte chunks. Join them.
+                chunks = [
+                    c.decode("utf-8", "replace") if isinstance(c, (bytes, bytearray)) else str(c)
+                    for c in getattr(rr, "strings", [])
+                ]
+                out.append("".join(chunks) if chunks else str(rr).strip('"'))
+            return out
+        except Exception:
+            return []
+
+    def _first(records: list[str], prefix: str) -> str | None:
+        for r in records:
+            if r.lower().startswith(prefix):
+                return r
+        return None
+
+    root = _txt(domain)
+    spf_val = _first(root, "v=spf1")
+    spf_verdict = (
+        "ok" if spf_val and (" -all" in spf_val or " ~all" in spf_val) else
+        "soft" if spf_val else "missing"
+    )
+
+    dmarc = _first(_txt(f"_dmarc.{domain}"), "v=dmarc1")
+    dmarc_verdict = (
+        "ok" if dmarc and "p=reject" in dmarc.lower() else
+        "soft" if dmarc and "p=quarantine" in dmarc.lower() else
+        "soft" if dmarc else "missing"
+    )
+
+    # Probe common DKIM selectors. Stop at the first hit; report it.
+    dkim_selector = None
+    dkim_val = None
+    for sel in ("selector1", "selector2", "google", "default", "s1", "s2", "k1"):
+        vals = _txt(f"{sel}._domainkey.{domain}")
+        if vals:
+            dkim_selector = sel
+            dkim_val = vals[0]
+            break
+    dkim_verdict = "ok" if dkim_val else "missing"
+
+    def _trim(v: str | None) -> str | None:
+        if not v:
+            return v
+        return v if len(v) <= 220 else v[:217] + "..."
+
+    return {
+        "domain": domain,
+        "spf":   {"verdict": spf_verdict,   "value": _trim(spf_val)},
+        "dkim":  {"verdict": dkim_verdict,  "value": _trim(dkim_val),
+                  "selector": dkim_selector},
+        "dmarc": {"verdict": dmarc_verdict, "value": _trim(dmarc)},
+    }
+
+
+@router.get("/outreach-stats")
+def outreach_stats():
+    """Reply-rate breakdown by style signals, to answer the 'which
+    approaches get replies?' question. Groups sent leads by:
+      - cv_cluster (which CV / pitch specialty)
+      - body_length_bucket (<60 / 60-120 / 120+ words)
+      - subject_prefix (first word of gen_subject, lowercased)
+      - weekday (Mon-Sun of sent_at)
+
+    For each bucket returns sent / replied / positive counts plus
+    percentages. Small table, recomputed on-demand — no caching. Use
+    this to spot which buckets outperform the average."""
+    def bucket_len(body: str | None) -> str:
+        if not body:
+            return "unknown"
+        words = len(body.split())
+        if words < 60:
+            return "short (<60w)"
+        if words < 120:
+            return "medium (60-120w)"
+        return "long (120+w)"
+
+    def subject_prefix(subj: str | None) -> str:
+        if not subj:
+            return "(none)"
+        first = subj.strip().split(" ", 1)[0].lower().strip(",.:;?!")
+        return first[:20] if first else "(empty)"
+
+    def weekday(iso: str | None) -> str:
+        if not iso:
+            return "unknown"
+        try:
+            return dt.datetime.fromisoformat(iso).strftime("%a")
+        except ValueError:
+            return "unknown"
+
+    with connect() as con:
+        rows = con.execute(
+            "SELECT l.id, l.gen_subject, l.gen_body, l.cv_cluster, l.sent_at, "
+            "       l.replied_at, "
+            "       (SELECT sentiment FROM replies WHERE lead_id = l.id "
+            "        ORDER BY id DESC LIMIT 1) AS sentiment "
+            "FROM leads l WHERE l.sent_at IS NOT NULL"
+        ).fetchall()
+
+    def _bucket() -> dict:
+        return {"sent": 0, "replied": 0, "positive": 0}
+
+    groups = {
+        "cv_cluster":    {},
+        "body_length":   {},
+        "subject_first": {},
+        "weekday":       {},
+    }
+
+    for r in rows:
+        replied = bool(r["replied_at"])
+        positive = replied and (r["sentiment"] or "").lower() == "positive"
+
+        keys = {
+            "cv_cluster":    (r["cv_cluster"] or "(none)"),
+            "body_length":   bucket_len(r["gen_body"]),
+            "subject_first": subject_prefix(r["gen_subject"]),
+            "weekday":       weekday(r["sent_at"]),
+        }
+        for group, key in keys.items():
+            b = groups[group].setdefault(key, _bucket())
+            b["sent"] += 1
+            if replied:
+                b["replied"] += 1
+            if positive:
+                b["positive"] += 1
+
+    def pct(n: int, d: int) -> float:
+        return round(n / d * 100, 1) if d else 0.0
+
+    def serialise(by: dict) -> list[dict]:
+        # Sort so UI can show best-performing first but small buckets
+        # don't dominate. Require >=3 sent to rank by reply rate.
+        items = []
+        for k, v in by.items():
+            items.append({
+                "key": k,
+                "sent": v["sent"],
+                "replied": v["replied"],
+                "positive": v["positive"],
+                "reply_rate_pct": pct(v["replied"], v["sent"]),
+                "positive_rate_pct": pct(v["positive"], v["sent"]),
+            })
+        items.sort(
+            key=lambda x: (x["sent"] >= 3, x["reply_rate_pct"], x["sent"]),
+            reverse=True,
+        )
+        return items
+
+    total_sent = len(rows)
+    total_replied = sum(1 for r in rows if r["replied_at"])
+    total_positive = sum(
+        1 for r in rows
+        if r["replied_at"] and (r["sentiment"] or "").lower() == "positive"
+    )
+
+    return {
+        "totals": {
+            "sent": total_sent,
+            "replied": total_replied,
+            "positive": total_positive,
+            "reply_rate_pct": pct(total_replied, total_sent),
+            "positive_rate_pct": pct(total_positive, total_sent),
+        },
+        "by_cv_cluster":    serialise(groups["cv_cluster"]),
+        "by_body_length":   serialise(groups["body_length"]),
+        "by_subject_first": serialise(groups["subject_first"]),
+        "by_weekday":       serialise(groups["weekday"]),
+    }
+
+
 # -------------------------------------------------- per-lead event timeline
 
 
@@ -865,11 +1157,11 @@ def run_followups(payload: FollowupRunIn):
                     (token, lead["id"]),
                 )
                 con.commit()
-        import os as _os
-        _base = _os.environ.get(
-            "LINKEDIN_TRACKING_BASE_URL", "http://localhost:8900"
-        ).rstrip("/")
-        pixel_url = f"{_base}/api/linkedin/t/open/{token}.gif"
+        # Reuse the public-host guard from linkedin_api so a localhost /
+        # RFC1918 base URL produces no pixel (same behaviour as the primary
+        # send path). Avoids shipping a broken <img> tag in follow-ups.
+        from linkedin_api import _tracking_pixel_url as _tp  # noqa: WPS433
+        pixel_url = _tp(token)
 
         # Follow-ups are intentionally text-only — a second-touch with the
         # same CV re-attached looks spammy, and most recipients already

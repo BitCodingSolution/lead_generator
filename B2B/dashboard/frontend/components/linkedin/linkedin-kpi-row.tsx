@@ -13,6 +13,8 @@ export function LinkedInKpiRow() {
     { refreshInterval: 15_000 },
   )
 
+  const pending = data?.replied_pending ?? 0
+
   const cards: {
     label: string
     value: number | undefined
@@ -20,6 +22,7 @@ export function LinkedInKpiRow() {
     accent?: "violet" | "emerald" | "amber" | "rose" | "sky"
     hint?: string
     href?: string
+    badge?: { text: string; tone?: "amber" | "rose" | "emerald" | "sky" } | null
   }[] = [
     {
       label: "Total leads",
@@ -50,7 +53,15 @@ export function LinkedInKpiRow() {
       value: data?.replied,
       icon: <MessageSquareReply className="size-4" />,
       accent: "amber",
-      href: "/linkedin/replies",
+      // Land directly on the unhandled queue when there's pending work,
+      // otherwise the full /replies feed.
+      href: pending > 0 ? "/linkedin/replies?handled=false" : "/linkedin/replies",
+      hint: pending > 0
+        ? `${pending} need your reply`
+        : "all handled",
+      badge: pending > 0
+        ? { text: `${pending} pending`, tone: "rose" }
+        : null,
     },
     {
       label: "Bounced",
@@ -83,6 +94,7 @@ export function LinkedInKpiRow() {
           loading={isLoading}
           index={i}
           href={c.href}
+          badge={c.badge}
         />
       ))}
     </div>

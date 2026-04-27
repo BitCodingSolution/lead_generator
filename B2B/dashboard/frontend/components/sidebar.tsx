@@ -14,6 +14,7 @@ import {
   Settings,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { usePendingReplies } from "@/lib/use-pending-replies"
 
 type NavItem = {
   href: string
@@ -57,6 +58,7 @@ function isActive(pathname: string | null, href: string): boolean {
 
 export function Sidebar() {
   const pathname = usePathname()
+  const pendingReplies = usePendingReplies()
   return (
     <aside className="hidden md:flex flex-col w-[220px] shrink-0 border-r border-zinc-800/80 bg-[#0c0c0e] h-screen sticky top-0">
       <div className="px-5 py-5 border-b border-zinc-800/70">
@@ -82,6 +84,12 @@ export function Sidebar() {
             {section.items.map((item) => {
               const Icon = item.icon
               const active = isActive(pathname, item.href)
+              // The LinkedIn → Replies link is the only spot that gets a
+              // pending badge today. The Workspace → Replies link talks
+              // to a separate B2B replies endpoint, so we leave it alone
+              // until that one wires up its own count.
+              const showPending =
+                item.href === "/linkedin/replies" && pendingReplies > 0
               return (
                 <Link
                   key={item.href}
@@ -105,6 +113,14 @@ export function Sidebar() {
                     )}
                   />
                   <span className="tracking-tight">{item.label}</span>
+                  {showPending && (
+                    <span
+                      className="ml-auto inline-flex items-center justify-center min-w-[18px] h-[18px] px-1.5 rounded-full bg-rose-500 text-[10px] font-semibold text-white tnum animate-pulse"
+                      title={`${pendingReplies} reply${pendingReplies === 1 ? "" : "ies"} need your action`}
+                    >
+                      {pendingReplies}
+                    </span>
+                  )}
                 </Link>
               )
             })}

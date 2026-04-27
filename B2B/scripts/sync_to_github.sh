@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # sync_to_github.sh — push local B2B changes to
-#   github.com/pradipkachhadiya123/lead_generator  (B2B/ subfolder).
+#   github.com/BitCodingSolution/lead_generator  (B2B/ subfolder).
 #
 # Usage:
 #   bash scripts/sync_to_github.sh "my commit message"
@@ -14,7 +14,7 @@
 set -euo pipefail
 
 MIRROR="/c/temp/lead_generator"
-REMOTE_URL="https://github.com/pradipkachhadiya123/lead_generator.git"
+REMOTE_URL="https://github.com/BitCodingSolution/lead_generator.git"
 LOCAL_B2B="H:\\Lead Generator\\B2B"
 PY="C:/Program Files/Python311/python.exe"
 MSG="${1:-sync: local changes}"
@@ -68,4 +68,4 @@ git -c user.name="Pradip Kachhadiya" -c user.email="pradip@bitcodingsolutions.co
 echo "[mirror] pushing"
 git push
 
-echo "✓ pushed to main — https://github.com/pradipkachhadiya123/lead_generator/tree/main/B2B"
+echo "✓ pushed to main — https://github.com/BitCodingSolution/lead_generator/tree/main/B2B"

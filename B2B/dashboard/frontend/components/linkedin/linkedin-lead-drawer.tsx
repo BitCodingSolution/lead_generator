@@ -4,7 +4,7 @@ import * as React from "react"
 import useSWR, { mutate } from "swr"
 import {
   X, Sparkles, Archive, Loader2, ExternalLink, Mail, Check, Send, Phone, Eye,
-  Clock, XCircle,
+  Clock, XCircle, BellOff,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { api, swrFetcher } from "@/lib/api"
@@ -34,8 +34,9 @@ export function LinkedInLeadDrawer({
   const [subject, setSubject] = React.useState("")
   const [body, setBody] = React.useState("")
   const [note, setNote] = React.useState("")
-  const [busy, setBusy] = React.useState<"" | "draft" | "save" | "archive" | "send" | "schedule">("")
+  const [busy, setBusy] = React.useState<"" | "draft" | "save" | "archive" | "send" | "schedule" | "snooze">("")
   const [schedulerOpen, setSchedulerOpen] = React.useState(false)
+  const [snoozeOpen, setSnoozeOpen] = React.useState(false)
   const [toast, setToast] = React.useState<string | null>(null)
 
   // Sync local edits from the server lead. Re-fires when the server-side
@@ -172,6 +173,39 @@ export function LinkedInLeadDrawer({
     try {
       await api.post(`/api/linkedin/leads/${lead.id}/unschedule`)
       setToast("Schedule cancelled")
+      refresh()
+      mutate((k) => typeof k === "string" && k.startsWith("/api/linkedin/"))
+    } catch (e) {
+      setToast((e as Error).message)
+    } finally {
+      setBusy("")
+    }
+  }
+
+  async function onSnooze(remindAt: string) {
+    if (!lead) return
+    setBusy("snooze")
+    try {
+      await api.post(`/api/linkedin/leads/${lead.id}/snooze`, {
+        remind_at: remindAt,
+      })
+      setSnoozeOpen(false)
+      setToast("Snoozed")
+      refresh()
+      mutate((k) => typeof k === "string" && k.startsWith("/api/linkedin/"))
+    } catch (e) {
+      setToast((e as Error).message)
+    } finally {
+      setBusy("")
+    }
+  }
+
+  async function onUnsnooze() {
+    if (!lead) return
+    setBusy("snooze")
+    try {
+      await api.post(`/api/linkedin/leads/${lead.id}/unsnooze`)
+      setToast("Reminder cleared")
       refresh()
       mutate((k) => typeof k === "string" && k.startsWith("/api/linkedin/"))
     } catch (e) {
@@ -392,6 +426,15 @@ export function LinkedInLeadDrawer({
                             onUnschedule={onUnschedule}
                           />
                         )}
+                        <SnoozePicker
+                          lead={lead}
+                          open={snoozeOpen}
+                          busy={busy === "snooze"}
+                          onOpen={() => setSnoozeOpen(true)}
+                          onClose={() => setSnoozeOpen(false)}
+                          onSnooze={onSnooze}
+                          onUnsnooze={onUnsnooze}
+                        />
                       </>
                     )
                   })()}
@@ -696,6 +739,92 @@ function SchedulePicker({
   )
 }
 
+function SnoozePicker({
+  lead, open, busy, onOpen, onClose, onSnooze, onUnsnooze,
+}: {
+  lead: LinkedInLead
+  open: boolean
+  busy: boolean
+  onOpen: () => void
+  onClose: () => void
+  onSnooze: (remindAt: string) => void
+  onUnsnooze: () => void
+}) {
+  const [custom, setCustom] = React.useState("")
+  const snoozed = !!lead.remind_at
+
+  function submitCustom() {
+    if (!custom) return
+    onSnooze(new Date(custom).toISOString())
+  }
+
+  if (snoozed) {
+    return (
+      <div className="relative inline-flex items-center gap-1 rounded-md border border-sky-500/30 bg-sky-500/10 px-2 py-1 text-[11px] text-sky-300">
+        <BellOff className="size-3" />
+        <span title={`Reminds ${lead.remind_at}`}>
+          Snoozed {fmtWhen(lead.remind_at!)}
+        </span>
+        <button
+          onClick={onUnsnooze}
+          disabled={busy}
+          className="ml-1 text-sky-200 hover:text-white disabled:opacity-50"
+          title="Clear reminder"
+        >
+          {busy ? <Loader2 className="size-3 animate-spin" /> : <XCircle className="size-3" />}
+        </button>
+      </div>
+    )
+  }
+
+  return (
+    <div className="relative">
+      <button
+        onClick={onOpen}
+        disabled={busy}
+        className="inline-flex items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-800/60 px-2.5 py-1 text-xs text-zinc-200 hover:bg-zinc-800 disabled:opacity-40"
+        title="Hide until a later time"
+      >
+        {busy ? <Loader2 className="size-3 animate-spin" /> : <BellOff className="size-3" />}
+        Snooze
+      </button>
+      {open && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={onClose} />
+          <div className="absolute right-0 top-full mt-1 z-50 w-64 rounded-md border border-zinc-700 bg-zinc-900 p-3 text-xs shadow-lg">
+            <div className="mb-2 text-[10px] font-medium uppercase tracking-[0.1em] text-zinc-500">
+              Remind me in
+            </div>
+            <div className="flex flex-col gap-1 mb-3">
+              <PresetBtn label="2 hours" onClick={() => onSnooze("2h")} />
+              <PresetBtn label="1 day" onClick={() => onSnooze("1d")} />
+              <PresetBtn label="3 days" onClick={() => onSnooze("3d")} />
+              <PresetBtn label="1 week" onClick={() => onSnooze("1w")} />
+            </div>
+            <div className="mb-2 text-[10px] font-medium uppercase tracking-[0.1em] text-zinc-500">
+              Or pick a date
+            </div>
+            <input
+              type="datetime-local"
+              value={custom}
+              onChange={(e) => setCustom(e.target.value)}
+              className="w-full rounded border border-zinc-800 bg-zinc-900/60 px-2 py-1 text-xs text-zinc-200"
+            />
+            <button
+              onClick={submitCustom}
+              disabled={!custom}
+              className="mt-2 w-full rounded bg-[hsl(210_80%_55%)] px-2 py-1 text-xs text-white hover:bg-[hsl(210_80%_62%)] disabled:opacity-40"
+            >
+              Snooze until that time
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+
 function PresetBtn({ label, onClick }: { label: string; onClick: () => void }) {
   return (
     <button
@@ -763,6 +892,34 @@ const REPLY_TEMPLATES: { label: string; body: string }[] = [
   },
 ]
 
+type ThreadEntry = {
+  direction: "out_initial" | "in" | "out_reply"
+  at: string
+  // Common
+  body?: string | null
+  // out_initial
+  subject?: string | null
+  // in
+  id?: number
+  from_email?: string | null
+  kind?: string
+  sentiment?: string | null
+  intent?: string | null
+  handled_at?: string | null
+  auto_draft_body?: string | null
+  auto_draft_at?: string | null
+}
+
+const INTENT_LABEL: Record<string, string> = {
+  form_fill: "📋 form fill",
+  interview_request: "🎯 interview",
+  scheduling: "📅 schedule",
+  salary_question: "💰 rate ask",
+  referral: "↪ referral",
+  info_request: "📎 info ask",
+  rejection: "❌ rejection",
+}
+
 type RepliesPayload = {
   lead: {
     id: number
@@ -783,6 +940,7 @@ type RepliesPayload = {
     auto_draft_body: string | null
     auto_draft_at: string | null
   }>
+  thread?: ThreadEntry[]
 }
 
 function RepliesSection({
@@ -807,6 +965,17 @@ function RepliesSection({
 
   const inbound = (data?.replies ?? []).filter((r) => r.kind === "reply")
   const latest = inbound[inbound.length - 1]
+  // Render the merged conversation (inbound + outbound replies, ordered
+  // chronologically). Skip the out_initial since the drawer already shows
+  // the original cold mail in the dedicated "Sent message" section above.
+  const thread: ThreadEntry[] = (data?.thread ?? []).filter(
+    (e) => e.direction !== "out_initial",
+  )
+  // Reply composer only shows when the most-recent thread entry is
+  // inbound — i.e. we actually owe a reply. If Jaydip just sent something
+  // and is waiting on the prospect, hide the composer to reduce clutter.
+  const lastEntry = thread[thread.length - 1]
+  const owesReply = !!lastEntry && lastEntry.direction === "in"
 
   // Auto-fill textarea with the background-generated draft the first
   // time the drawer has it. Never clobbers what the user has typed.
@@ -865,41 +1034,37 @@ function RepliesSection({
     <section className="rounded-md border border-amber-500/20 bg-amber-500/5 p-3">
       <div className="flex items-center justify-between mb-2">
         <div className="text-[11px] font-medium uppercase tracking-[0.1em] text-amber-300">
-          Received reply {inbound.length > 1 && `(${inbound.length})`}
+          Conversation thread {thread.length > 0 && `(${thread.length})`}
         </div>
-        {latest && (
+        {data?.lead.received_on_email && (
           <div className="text-[10px] text-zinc-500">
-            {latest.received_at?.slice(0, 16).replace("T", " ")}
+            on <span className="font-mono text-zinc-400">{data.lead.received_on_email}</span>
           </div>
         )}
       </div>
 
       {isLoading ? (
         <div className="text-xs text-zinc-500">Loading…</div>
-      ) : !latest ? (
+      ) : thread.length === 0 ? (
         <div className="text-xs text-zinc-500">No reply content captured.</div>
       ) : (
         <>
-          <div className="text-[11px] text-zinc-400 mb-1 flex flex-wrap items-center gap-x-3 gap-y-0.5">
-            <span>
-              From <span className="font-mono text-zinc-300">{latest.from_email}</span>
-            </span>
-            {data?.lead.received_on_email && (
-              <span className="text-zinc-500">
-                → on <span className="font-mono text-zinc-400">{data.lead.received_on_email}</span>
-              </span>
-            )}
-          </div>
-          {/* Resizable read-only viewport — user can drag the corner
-              handle to grow it for long inbound mails, scrolls inside
-              when content exceeds the box. */}
-          <div
-            className="rounded border border-zinc-800 bg-zinc-900/60 p-2 text-xs text-zinc-200 whitespace-pre-wrap overflow-y-auto resize-y leading-relaxed"
-            style={{ minHeight: "8rem", height: "12rem", maxHeight: "60vh" }}
-          >
-            {latest.body || latest.snippet || "(empty)"}
+          {/* Merged thread — each message rendered as its own card, oldest
+              first. Inbound = amber tint, our replies = teal tint. */}
+          <div className="space-y-2 mb-3">
+            {thread.map((entry, idx) => (
+              <ThreadMessage key={`${entry.direction}-${entry.at}-${idx}`} entry={entry} />
+            ))}
           </div>
 
+          {!owesReply && (
+            <div className="rounded border border-zinc-800/60 bg-zinc-900/40 px-2.5 py-2 text-[11px] text-zinc-500">
+              You replied last — waiting on the prospect. Composer reopens
+              when they write back.
+            </div>
+          )}
+
+          {owesReply && (
           <div className="mt-3">
             <div className="flex items-center justify-between mb-1">
               <div className="flex items-center gap-2">
@@ -991,6 +1156,21 @@ function RepliesSection({
               className="w-full rounded border border-zinc-800 bg-zinc-900/60 px-2 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 font-mono leading-relaxed focus:outline-none focus:border-[hsl(250_80%_62%)] overflow-y-auto resize-y"
             />
             <div className="mt-2 flex items-center justify-end gap-2">
+              {draftBody.trim() && (
+                <button
+                  onClick={() => {
+                    if (!confirm("Discard this draft? Text will be cleared.")) return
+                    setDraftBody("")
+                    setPrefilled(true)
+                  }}
+                  disabled={!!busy}
+                  className="inline-flex items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-800/60 px-2.5 py-1 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-40"
+                  title="Clear the draft — keeps the lead open so you can re-draft"
+                >
+                  <XCircle className="size-3" />
+                  Discard
+                </button>
+              )}
               <button
                 onClick={onSend}
                 disabled={!!busy || !draftBody.trim()}
@@ -1005,8 +1185,51 @@ function RepliesSection({
               </button>
             </div>
           </div>
+          )}
         </>
       )}
     </section>
+  )
+}
+
+function ThreadMessage({ entry }: { entry: ThreadEntry }) {
+  const isInbound = entry.direction === "in"
+  const tone = isInbound
+    ? "border-amber-500/30 bg-amber-500/5"
+    : "border-emerald-500/30 bg-emerald-500/5"
+  const labelTone = isInbound ? "text-amber-300" : "text-emerald-300"
+  const label = isInbound
+    ? `From ${entry.from_email ?? "(unknown)"}`
+    : "Your reply"
+  const when = entry.at?.slice(0, 16).replace("T", " ")
+
+  return (
+    <div className={cn("rounded border p-2.5", tone)}>
+      <div className="flex items-center justify-between mb-1 text-[11px]">
+        <span className={cn("font-medium", labelTone)}>
+          {label}
+          {entry.kind && entry.kind !== "reply" && (
+            <span className="ml-2 rounded bg-zinc-800 px-1 py-0.5 text-[9px] text-zinc-400 uppercase">
+              {entry.kind}
+            </span>
+          )}
+          {entry.intent && INTENT_LABEL[entry.intent] && (
+            <span
+              className="ml-2 inline-flex items-center gap-0.5 rounded bg-violet-500/15 px-1.5 py-0.5 text-[10px] text-violet-300"
+              title={`Intent: ${entry.intent.replace(/_/g, " ")}`}
+            >
+              {INTENT_LABEL[entry.intent]}
+            </span>
+          )}
+        </span>
+        <span className="text-[10px] text-zinc-500 font-mono">{when}</span>
+      </div>
+      <div
+        className="rounded border border-zinc-800/70 bg-zinc-900/50 p-2 text-xs text-zinc-200 whitespace-pre-wrap leading-relaxed overflow-y-auto resize-y"
+        style={{ maxHeight: "32rem" }}
+      >
+        {entry.body || "(empty)"}
+      </div>
+    </div>
   )
 }

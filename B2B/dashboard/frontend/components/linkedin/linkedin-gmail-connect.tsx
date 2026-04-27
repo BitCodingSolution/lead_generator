@@ -27,6 +27,13 @@ type Account = {
   paused_reason: string | null
   connected_at: string
   last_verified_at: string | null
+  health_score?: number
+  health_30d?: {
+    sent: number
+    replied: number
+    bounced: number
+    bounce_rate_pct: number
+  }
 }
 
 type AccountsResp = {
@@ -340,6 +347,12 @@ function AccountRow({ account }: { account: Account }) {
             <CheckCircle2 className="size-3.5 text-emerald-400" />
           )}
           <div className="text-sm font-mono text-zinc-200">{account.email}</div>
+          {account.health_score != null && (
+            <HealthBadge
+              score={account.health_score}
+              stats={account.health_30d}
+            />
+          )}
           {isPaused && (
             <span
               className={cn(
@@ -631,5 +644,30 @@ function AddAccountForm({ onDone }: { onDone: () => void }) {
         </button>
       </div>
     </form>
+  )
+}
+
+
+function HealthBadge({ score, stats }: {
+  score: number
+  stats?: { sent: number; replied: number; bounced: number; bounce_rate_pct: number }
+}) {
+  const tone =
+    score >= 80 ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30"
+    : score >= 50 ? "bg-amber-500/15 text-amber-300 border-amber-500/30"
+    : "bg-rose-500/15 text-rose-300 border-rose-500/30"
+  const title = stats
+    ? `30d: ${stats.sent} sent, ${stats.replied} replied, ${stats.bounced} bounced (${stats.bounce_rate_pct}% bounce)`
+    : `Health ${score}/100`
+  return (
+    <span
+      title={title}
+      className={cn(
+        "inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] font-medium tnum",
+        tone,
+      )}
+    >
+      {score}
+    </span>
   )
 }

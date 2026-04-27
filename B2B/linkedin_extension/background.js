@@ -27,14 +27,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg && msg.type === "GENERATE_REPLY") {
-    handleGenerateReply()
+    handleGenerateReply(msg.userInstruction || "")
       .then((r) => sendResponse({ ok: true, ...r }))
       .catch((err) => sendResponse({ ok: false, error: err.message }));
     return true;
   }
 
   if (msg && msg.type === "REFINE_REPLY") {
-    handleRefineReply(msg.refineType, msg.currentReply)
+    handleRefineReply(msg.refineType, msg.currentReply, msg.userInstruction || "")
       .then((r) => sendResponse({ ok: true, ...r }))
       .catch((err) => sendResponse({ ok: false, error: err.message }));
     return true;
@@ -445,7 +445,7 @@ function rand(min, max) {
 // REPLY FLOW
 // ============================================================
 
-async function handleGenerateReply() {
+async function handleGenerateReply(userInstruction = "") {
   await preflightSafety();
 
   const settings = await chrome.storage.local.get([
@@ -483,13 +483,15 @@ async function handleGenerateReply() {
     throw new Error("No messages found in the open conversation.");
   }
 
+  const userPrompt = buildReplyUserPrompt(convo, userInstruction);
+
   let reply;
   if (backend === "bridge") {
     const bridgeUrl = settings.bridgeUrl || "http://127.0.0.1:8765";
     reply = await callBridgeRaw(
       bridgeUrl,
       buildReplySystemPrompt(style),
-      buildReplyUserPrompt(convo)
+      userPrompt
     );
   } else {
     const apiKey = settings.claudeApiKey;
@@ -502,7 +504,7 @@ async function handleGenerateReply() {
     reply = await callClaudeRaw(
       apiKey,
       buildReplySystemPrompt(style),
-      buildReplyUserPrompt(convo)
+      userPrompt
     );
   }
 
@@ -533,7 +535,7 @@ const REFINE_INSTRUCTIONS = {
     "Rewrite so the reply asks ONE clear clarifying question (about scope, tech stack, or timeline — pick whichever is most missing in their message). Keep it short.",
 };
 
-async function handleRefineReply(refineType, currentReply) {
+async function handleRefineReply(refineType, currentReply, userInstruction = "") {
   await preflightSafety();
 
   if (!currentReply || !currentReply.trim()) {
@@ -575,7 +577,7 @@ async function handleRefineReply(refineType, currentReply) {
   const convo = readResp.conversation;
 
   const userPrompt =
-    buildReplyUserPrompt(convo) +
+    buildReplyUserPrompt(convo, userInstruction) +
     `\n\n---\n\nMy CURRENT DRAFT reply:\n"""\n${currentReply}\n"""\n\n` +
     `REFINEMENT INSTRUCTION: ${instruction}\n\n` +
     `Output ONLY the refined reply body. Keep the sign-off line exactly: ${style.signOff}`;
@@ -754,7 +756,7 @@ function buildReplySystemPrompt(style) {
   );
 }
 
-function buildReplyUserPrompt(convo) {
+function buildReplyUserPrompt(convo, userInstruction = "") {
   const conversationText = convo.messages
     .slice(-15)
     .map(
@@ -762,10 +764,26 @@ function buildReplyUserPrompt(convo) {
     )
     .join("\n\n");
 
+  // When Jaydip provides an extra instruction in the popup textarea, it
+  // is the single most important steering signal. Pin it ABOVE the
+  // conversation so the model can't drift past it, and reinforce it
+  // again at the end. Keep wording terse so it doesn't bloat the prompt.
+  const instrBlock = userInstruction.trim()
+    ? `\n\n*** JAYDIP'S OVERRIDE INSTRUCTION FOR THIS REPLY ***\n` +
+      `${userInstruction.trim()}\n` +
+      `Treat this as a hard rule. It overrides the default reply heuristics.\n` +
+      `*** END OVERRIDE ***\n`
+    : "";
+
+  const closingNudge = userInstruction.trim()
+    ? `Write Jaydip's next reply now, FOLLOWING the override instruction above.`
+    : `Write Jaydip's next reply now.`;
+
   return (
     `Participant: ${convo.participantName || "Unknown"}\n\n` +
+    instrBlock +
     `Conversation so far (oldest to newest):\n\n${conversationText}\n\n` +
-    `Write Jaydip's next reply now.`
+    closingNudge
   );
 }
 
