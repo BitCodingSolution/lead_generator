@@ -1032,13 +1032,18 @@ function RepliesSection({
 
   return (
     <section className="rounded-md border border-amber-500/20 bg-amber-500/5 p-3">
-      <div className="flex items-center justify-between mb-2">
+      <div className="flex items-center justify-between gap-2 mb-2 flex-wrap">
         <div className="text-[11px] font-medium uppercase tracking-[0.1em] text-amber-300">
           Conversation thread {thread.length > 0 && `(${thread.length})`}
         </div>
         {data?.lead.received_on_email && (
-          <div className="text-[10px] text-zinc-500">
-            on <span className="font-mono text-zinc-400">{data.lead.received_on_email}</span>
+          <div
+            className="inline-flex items-center gap-1.5 rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-200"
+            title="The inbox this conversation is landing in"
+          >
+            <Mail className="size-3" />
+            <span className="text-amber-300/70">Inbox:</span>
+            <span className="font-mono text-amber-100">{data.lead.received_on_email}</span>
           </div>
         )}
       </div>
