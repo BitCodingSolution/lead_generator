@@ -543,6 +543,118 @@ function TimelineSection({ leadId }: { leadId: number }) {
   )
 }
 
+// Inline edit for email / phone in the drawer Facts grid. Click the
+// value (or pencil) to enter edit mode; Enter or blur saves; Escape
+// cancels. Backend rejects malformed emails (double dots, spaces, etc.)
+// and the error is surfaced inline.
+function DrawerEditField({
+  leadId,
+  field,
+  value,
+  icon,
+}: {
+  leadId: number
+  field: "email" | "phone"
+  value: string | null
+  icon: "mail" | "phone"
+}) {
+  const initial = value ?? ""
+  const [editing, setEditing] = React.useState(false)
+  const [draft, setDraft] = React.useState(initial)
+  const [busy, setBusy] = React.useState(false)
+  const [err, setErr] = React.useState<string | null>(null)
+  const inputRef = React.useRef<HTMLInputElement | null>(null)
+
+  React.useEffect(() => {
+    if (!editing) setDraft(initial)
+  }, [initial, editing])
+
+  React.useEffect(() => {
+    if (editing && inputRef.current) {
+      inputRef.current.focus()
+      inputRef.current.select()
+    }
+  }, [editing])
+
+  async function save() {
+    const trimmed = draft.trim()
+    if (trimmed === initial) {
+      setEditing(false)
+      setErr(null)
+      return
+    }
+    setBusy(true)
+    setErr(null)
+    try {
+      await api.post(`/api/linkedin/leads/${leadId}`, { [field]: trimmed })
+      mutate((k) => typeof k === "string" && k.startsWith("/api/linkedin/"))
+      setEditing(false)
+    } catch (e) {
+      setErr((e as Error).message.replace(/^.*Invalid email format:\s*/, "bad email: "))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (editing) {
+    return (
+      <div className="flex flex-col gap-0.5">
+        <input
+          ref={inputRef}
+          type={field === "email" ? "email" : "tel"}
+          value={draft}
+          disabled={busy}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault()
+              save()
+            } else if (e.key === "Escape") {
+              e.preventDefault()
+              setEditing(false)
+              setErr(null)
+              setDraft(initial)
+            }
+          }}
+          onBlur={save}
+          className={cn(
+            "rounded border bg-zinc-950/80 px-1.5 py-0.5 text-xs font-mono w-full",
+            err ? "border-rose-500/60 text-rose-200" : "border-zinc-700 text-zinc-100",
+            "focus:outline-none focus:border-[hsl(250_80%_62%)]",
+          )}
+        />
+        {err && (
+          <span className="text-[10px] text-rose-300 truncate">{err}</span>
+        )}
+      </div>
+    )
+  }
+
+  const Icon = icon === "mail" ? Mail : Phone
+
+  return (
+    <button
+      type="button"
+      onClick={() => setEditing(true)}
+      className={cn(
+        "group inline-flex items-center gap-1 rounded px-1 -mx-1 py-0.5 hover:bg-zinc-800/60 transition text-left",
+        initial
+          ? icon === "mail"
+            ? "text-[hsl(250_80%_72%)]"
+            : "font-mono text-zinc-300"
+          : "text-zinc-600 italic",
+      )}
+      title={initial ? "Click to edit" : "Click to add"}
+    >
+      <Icon className="size-3" />
+      <span className="truncate">{initial || `add ${field}`}</span>
+      <span className="opacity-0 group-hover:opacity-60 text-[10px] not-italic">
+        ✎
+      </span>
+    </button>
+  )
+}
+
 function fmtTs(iso: string): string {
   try {
     return new Date(iso).toLocaleString(undefined, {
@@ -576,31 +688,11 @@ function Facts({ lead }: { lead: LeadFull }) {
     { k: "Tech", v: lead.tech_stack || "—" },
     {
       k: "Email",
-      v: lead.email ? (
-        <a
-          href={`mailto:${lead.email}`}
-          className="inline-flex items-center gap-1 text-[hsl(250_80%_72%)] hover:underline"
-        >
-          <Mail className="size-3" />
-          {lead.email}
-        </a>
-      ) : (
-        "—"
-      ),
+      v: <DrawerEditField leadId={lead.id} field="email" value={lead.email} icon="mail" />,
     },
     {
       k: "Phone",
-      v: lead.phone ? (
-        <a
-          href={`tel:${lead.phone.replace(/\s+/g, "")}`}
-          className="inline-flex items-center gap-1 font-mono text-zinc-300 hover:text-zinc-100"
-        >
-          <Phone className="size-3" />
-          {lead.phone}
-        </a>
-      ) : (
-        "—"
-      ),
+      v: <DrawerEditField leadId={lead.id} field="phone" value={lead.phone} icon="phone" />,
     },
     { k: "Status", v: <span className="text-zinc-200">{lead.status}</span> },
   ]
