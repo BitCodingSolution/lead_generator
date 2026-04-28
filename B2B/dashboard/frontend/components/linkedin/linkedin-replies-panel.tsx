@@ -341,6 +341,20 @@ export function LinkedInRepliesPanel() {
                   </div>
                 )}
                 </div>
+                {clickable && !r.handled_at && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      onOpenLead(r.lead_id!)
+                    }}
+                    className="self-start shrink-0 inline-flex items-center gap-1 rounded-md border border-emerald-500/40 bg-emerald-500/10 px-2.5 py-1 text-[11px] font-medium text-emerald-200 hover:bg-emerald-500/20 transition"
+                    title="Open this lead and reply"
+                  >
+                    <MessageSquareReply className="size-3" />
+                    Reply
+                  </button>
+                )}
               </li>
             )
           })}
