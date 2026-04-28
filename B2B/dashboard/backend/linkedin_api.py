@@ -1004,6 +1004,11 @@ class LeadPatch(BaseModel):
     email_mode: Optional[str] = None
     needs_attention: Optional[bool] = None
     call_status: Optional[str] = None    # green | yellow | red | "" (clears)
+    # Inline email correction: drafter / scraper sometimes captures a
+    # malformed address (e.g. "abhishek@jigya..com"). Letting Jaydip fix
+    # it inline avoids re-running the whole pipeline.
+    email: Optional[str] = None
+    phone: Optional[str] = None
 
 
 @router.post("/leads/{lead_id:int}")
@@ -1018,6 +1023,23 @@ def patch_lead(lead_id: int, patch: LeadPatch):
         if cs not in ("", "green", "yellow", "red"):
             raise HTTPException(400, "call_status must be green/yellow/red/empty")
         updates["call_status"] = cs or None
+    if "email" in updates:
+        em = str(updates["email"] or "").strip()
+        if em:
+            # Cheap structural check — defends against typos like
+            # "name@domain..com" that fail at SMTP time. We don't try to
+            # be RFC-perfect here; the SMTP layer will reject anything we
+            # let through that's still bad.
+            if (em.count("@") != 1
+                or ".." in em
+                or em.startswith(".") or em.endswith(".")
+                or " " in em
+                or "@." in em or ".@" in em):
+                raise HTTPException(400, f"Invalid email format: {em}")
+        updates["email"] = em or None
+    if "phone" in updates:
+        ph = str(updates["phone"] or "").strip()
+        updates["phone"] = ph or None
 
     # Any non-empty note or call_status counts as "user reviewed this lead".
     # Stamp reviewed_at once (first time) so the UI can dim reviewed rows.

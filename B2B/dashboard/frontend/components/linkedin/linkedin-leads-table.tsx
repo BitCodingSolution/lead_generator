@@ -330,10 +330,20 @@ export function LinkedInLeadsTable({
                   </Td>
                   <Td className="text-zinc-400">{r.role || "—"}</Td>
                   <Td className="font-mono text-xs text-zinc-300">
-                    {r.email || "—"}
+                    <EditableField
+                      lead={r}
+                      field="email"
+                      placeholder="add email"
+                      type="email"
+                    />
                   </Td>
                   <Td className="font-mono text-xs text-zinc-400">
-                    {r.phone || "—"}
+                    <EditableField
+                      lead={r}
+                      field="phone"
+                      placeholder="add phone"
+                      type="tel"
+                    />
                   </Td>
                   <Td>
                     <div className="flex items-center gap-1.5 flex-wrap">
@@ -648,6 +658,112 @@ function Th({
 }
 function Td({ children, className }: { children: React.ReactNode; className?: string }) {
   return <td className={cn("px-3 py-2 text-zinc-200", className)}>{children}</td>
+}
+
+// Inline-editable email/phone cell. Click to edit, Enter or blur saves,
+// Escape cancels. Validates via the backend (returns 400 on bad email
+// shape) so the user gets a clear error instead of a 500 at SMTP time.
+function EditableField({
+  lead,
+  field,
+  placeholder,
+  type = "text",
+}: {
+  lead: LinkedInLead
+  field: "email" | "phone"
+  placeholder: string
+  type?: string
+}) {
+  const initial = (lead[field] as string | null) ?? ""
+  const [editing, setEditing] = React.useState(false)
+  const [value, setValue] = React.useState(initial)
+  const [busy, setBusy] = React.useState(false)
+  const [err, setErr] = React.useState<string | null>(null)
+  const inputRef = React.useRef<HTMLInputElement | null>(null)
+
+  React.useEffect(() => {
+    if (!editing) setValue(initial)
+  }, [initial, editing])
+
+  React.useEffect(() => {
+    if (editing && inputRef.current) {
+      inputRef.current.focus()
+      inputRef.current.select()
+    }
+  }, [editing])
+
+  async function save() {
+    const trimmed = value.trim()
+    if (trimmed === (initial || "")) {
+      setEditing(false)
+      setErr(null)
+      return
+    }
+    setBusy(true)
+    setErr(null)
+    try {
+      await api.post(`/api/linkedin/leads/${lead.id}`, { [field]: trimmed })
+      mutate((k) => typeof k === "string" && k.startsWith("/api/linkedin/"))
+      setEditing(false)
+    } catch (e) {
+      setErr((e as Error).message.replace(/^.*Invalid email format:\s*/, "bad email: "))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (!editing) {
+    return (
+      <button
+        type="button"
+        onClick={() => setEditing(true)}
+        className={cn(
+          "group inline-flex items-center gap-1 rounded px-1 -mx-1 py-0.5 hover:bg-zinc-800/60 transition text-left",
+          !initial && "text-zinc-600 italic font-sans",
+        )}
+        title={initial ? "Click to edit" : "Click to add"}
+      >
+        <span className="truncate max-w-[220px]">{initial || placeholder}</span>
+        <span className="opacity-0 group-hover:opacity-60 text-[10px] not-italic font-sans">
+          ✎
+        </span>
+      </button>
+    )
+  }
+
+  return (
+    <div className="flex flex-col gap-0.5">
+      <input
+        ref={inputRef}
+        type={type}
+        value={value}
+        disabled={busy}
+        onChange={(e) => setValue(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault()
+            save()
+          } else if (e.key === "Escape") {
+            e.preventDefault()
+            setEditing(false)
+            setErr(null)
+            setValue(initial)
+          }
+        }}
+        onBlur={save}
+        className={cn(
+          "w-[220px] rounded border bg-zinc-950/80 px-1.5 py-0.5 text-xs font-mono",
+          err ? "border-rose-500/60 text-rose-200" : "border-zinc-700 text-zinc-100",
+          "focus:outline-none focus:border-[hsl(250_80%_62%)]",
+        )}
+      />
+      {err && (
+        <span className="text-[10px] text-rose-300 font-sans not-italic max-w-[220px] truncate">
+          {err}
+        </span>
+      )}
+    </div>
+  )
 }
 
 function EmptyRows({ loading }: { loading: boolean }) {
