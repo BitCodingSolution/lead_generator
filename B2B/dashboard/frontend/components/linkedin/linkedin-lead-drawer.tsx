@@ -1063,11 +1063,18 @@ function RepliesSection({
   const thread: ThreadEntry[] = (data?.thread ?? []).filter(
     (e) => e.direction !== "out_initial",
   )
-  // Reply composer only shows when the most-recent thread entry is
-  // inbound — i.e. we actually owe a reply. If Jaydip just sent something
-  // and is waiting on the prospect, hide the composer to reduce clutter.
+  // Reply composer shows when any of these is true:
+  //   1. The most-recent thread entry is inbound (latest message is theirs).
+  //   2. There's at least one unhandled inbound reply (handled_at IS NULL),
+  //      even if a later out_reply exists. This catches the case where we
+  //      replied to one mail but a second inbound came in unanswered.
+  // Hidden only when every inbound has been handled AND last entry is ours.
   const lastEntry = thread[thread.length - 1]
-  const owesReply = !!lastEntry && lastEntry.direction === "in"
+  const hasUnhandledInbound = thread.some(
+    (e) => e.direction === "in" && !e.handled_at,
+  )
+  const owesReply =
+    (!!lastEntry && lastEntry.direction === "in") || hasUnhandledInbound
 
   // Auto-fill textarea with the background-generated draft the first
   // time the drawer has it. Never clobbers what the user has typed.
