@@ -71,6 +71,49 @@
     requestAnimationFrame(tick);
   }
 
+  // Find and click LinkedIn's "Load more" button. Returns { clicked, via }.
+  // Why text-match fallback: LinkedIn's class names are obfuscated and
+  // change frequently, but the button label is stable. Strict equality on
+  // a tiny set of phrases keeps us from misclicking unrelated buttons.
+  function clickLoadMoreIfVisible() {
+    const semanticSelectors = [
+      'button.scaffold-finite-scroll__load-button',
+      'button[aria-label*="Load more" i]',
+      'button[aria-label*="Show more results" i]',
+    ];
+    for (const sel of semanticSelectors) {
+      try {
+        const btns = document.querySelectorAll(sel);
+        for (const b of btns) {
+          if (b.offsetParent !== null && !b.disabled) {
+            b.scrollIntoView({ block: 'center', behavior: 'instant' });
+            b.click();
+            return { clicked: true, via: sel };
+          }
+        }
+      } catch (_) {}
+    }
+    const labels = new Set([
+      'load more',
+      'load more results',
+      'show more',
+      'show more results',
+    ]);
+    try {
+      const all = document.querySelectorAll('button');
+      for (const b of all) {
+        if (!b.offsetParent || b.disabled) continue;
+        const text = (b.innerText || b.textContent || '').trim().toLowerCase();
+        if (labels.has(text)) {
+          b.scrollIntoView({ block: 'center', behavior: 'instant' });
+          b.click();
+          return { clicked: true, via: 'text:' + text };
+        }
+      }
+    } catch (_) {}
+    return { clicked: false };
+  }
+
   // Email regex — deliberately conservative. LinkedIn scrubs common patterns
   // like "dev [at] company [dot] com" so we don't try to unscramble those
   // in v1; only pick up literal email strings. False positives are worse
@@ -145,6 +188,12 @@
           const after = target.el ? target.el.scrollTop : window.scrollY;
           const maxScroll = Math.max(0, target.scrollHeight - target.clientHeight);
           const atBottom = after + target.clientHeight + 4 >= target.scrollHeight;
+          // LinkedIn's newer search-results layout ends with a discrete
+          // "Load more" button instead of pure infinite scroll. Wheel
+          // events alone won't fire it, so on every hop we look for the
+          // button and click it if visible. Safe even mid-feed: button
+          // only renders once LinkedIn has streamed everything it can.
+          const loadMore = clickLoadMoreIfVisible();
           sendResponse({
             ok: true,
             delta,
@@ -157,6 +206,8 @@
               ? Math.min(100, Math.round((after / maxScroll) * 100))
               : 0,
             atBottom,
+            loadMoreClicked: !!loadMore.clicked,
+            loadMoreVia: loadMore.via || null,
             targetTag: target.el ? target.el.tagName : 'window',
             targetClass: target.el && target.el.className ? String(target.el.className).slice(0, 60) : '',
             url: location.href,

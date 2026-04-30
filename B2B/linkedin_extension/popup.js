@@ -2096,11 +2096,19 @@ async function autoScrollToggle() {
 
       // At the bottom — LinkedIn streams more posts on demand. Give it a
       // longer pause so more content loads, then keep going. Don't stop.
+      // If the content script clicked the "Load more" button this hop,
+      // bump the wait further (button click triggers a fresh fetch +
+      // render cycle that takes ~1.5–3s on slow connections).
+      const loadMoreClicked = !!(resp && resp.loadMoreClicked);
       let wait = autoScrollRandomWait();
       if (atBottom) {
         atBottomStreak++;
         wait = Math.min(5000, 2500 + atBottomStreak * 300);
       } else {
+        atBottomStreak = 0;
+      }
+      if (loadMoreClicked) {
+        wait = Math.max(wait, 3500);
         atBottomStreak = 0;
       }
 
@@ -2113,7 +2121,9 @@ async function autoScrollToggle() {
       const pct = resp && typeof resp.progressPct === 'number' ? resp.progressPct : 0;
       if (autoScrollProgressFill) autoScrollProgressFill.style.width = pct + "%";
       if (autoScrollProgressLabel) {
-        const tail = atBottom ? " · 🔄 loading more" : "";
+        const tail = loadMoreClicked
+          ? " · 📥 Load more clicked"
+          : (atBottom ? " · 🔄 loading more" : "");
         autoScrollProgressLabel.textContent =
           `Hop ${hops} · ${pct}% · ${scanCurrentLeads.length} leads (+${leadsAdded})` +
           (remainingSec !== null ? ` · ${formatDuration(remainingSec)} left` : "") +
