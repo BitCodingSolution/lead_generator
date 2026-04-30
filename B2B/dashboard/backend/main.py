@@ -58,6 +58,8 @@ REQUIRE_AUTH = os.environ.get("DASHBOARD_REQUIRE_AUTH", "1") not in ("0", "false
 ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
+    "http://localhost:3001",
+    "http://127.0.0.1:3001",
 ]
 _extra_origins = os.environ.get("DASHBOARD_EXTRA_ORIGINS", "").strip()
 if _extra_origins:
