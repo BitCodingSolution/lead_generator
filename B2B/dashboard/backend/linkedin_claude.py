@@ -1,6 +1,6 @@
 """
 LinkedIn draft generator — calls the existing B2B Claude Bridge at
-http://127.0.0.1:8765/generate-reply and returns a structured result:
+http://127.0.0.1:8766/generate-reply and returns a structured result:
 
     {
       subject, body, email_mode,
@@ -23,7 +23,7 @@ from typing import Optional
 
 import requests
 
-BRIDGE_URL = "http://127.0.0.1:8765/generate-reply"
+BRIDGE_URL = "http://127.0.0.1:8766/generate-reply"
 BRIDGE_TIMEOUT_S = 180
 
 # ---- Feature switches ------------------------------------------------------
@@ -40,7 +40,7 @@ ENABLE_ENRICHMENT = os.environ.get("LINKEDIN_DRAFT_ENRICHMENT", "1") != "0"
 
 
 class BridgeUnreachable(Exception):
-    """Claude Bridge (localhost:8765) is offline or unreachable. Raised by
+    """Claude Bridge (localhost:8766) is offline or unreachable. Raised by
     generate_draft so the caller can refuse cleanly instead of falling back
     to a regex-only decision that might mis-archive a real lead."""
 
@@ -55,7 +55,7 @@ def bridge_is_up(timeout: float = 1.5) -> bool:
     by batch-drafter preflight so we don't spawn a worker that would
     immediately refuse every lead."""
     try:
-        r = requests.get("http://127.0.0.1:8765/", timeout=timeout)
+        r = requests.get("http://127.0.0.1:8766/", timeout=timeout)
         return 200 <= r.status_code < 500
     except requests.exceptions.RequestException:
         return False

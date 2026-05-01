@@ -1853,7 +1853,7 @@ def preflight():
     # Bridge
     bridge_ok = _ping_bridge(timeout=1.0)
     checks.append({"key": "bridge", "ok": bridge_ok,
-                   "error": None if bridge_ok else "Bridge not responding on :8765"})
+                   "error": None if bridge_ok else "Bridge not responding on :8766"})
 
     # Outlook + account
     outlook_ok, account_ok, err = _check_outlook()
@@ -2266,7 +2266,7 @@ def _ping_bridge(timeout: float = 1.5) -> bool:
     import urllib.error
     import urllib.request
     try:
-        req = urllib.request.Request("http://127.0.0.1:8765/", method="GET")
+        req = urllib.request.Request("http://127.0.0.1:8766/", method="GET")
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return 200 <= r.status < 500
     except urllib.error.HTTPError as e:
@@ -2277,7 +2277,7 @@ def _ping_bridge(timeout: float = 1.5) -> bool:
 
 @app.get("/api/bridge-health")
 def bridge_health():
-    """Ping the local Claude bridge (localhost:8765). Used for header indicator."""
+    """Ping the local Claude bridge (localhost:8766). Used for header indicator."""
     return {"ok": _ping_bridge()}
 
 

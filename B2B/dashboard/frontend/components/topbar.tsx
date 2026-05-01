@@ -76,7 +76,7 @@ export function Topbar() {
               ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-400"
               : "border-amber-500/20 bg-amber-500/10 text-amber-400",
           )}
-          title={bridgeOk ? "Bridge reachable on :8765" : "Bridge not responding — drafts/replies will fail"}
+          title={bridgeOk ? "Bridge reachable on :8766" : "Bridge not responding — drafts/replies will fail"}
         >
           <Plug className="size-3" />
           <span>{bridgeOk ? "Bridge online" : "Bridge offline"}</span>

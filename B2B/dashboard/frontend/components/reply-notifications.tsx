@@ -21,9 +21,15 @@ const LAST_SEEN_KEY = "reply_notifs_last_seen"
  */
 export function ReplyNotifications() {
   const pending = usePendingReplies()
-  const [permission, setPermission] = React.useState<NotificationPermission | "unsupported">(
-    typeof Notification === "undefined" ? "unsupported" : Notification.permission,
-  )
+  // Start as "unsupported" on both server and first client render so the
+  // hydrated tree matches SSR. The real permission state is read after
+  // mount in the effect below, which then triggers a re-render.
+  const [permission, setPermission] = React.useState<NotificationPermission | "unsupported">("unsupported")
+
+  React.useEffect(() => {
+    if (typeof Notification === "undefined") return
+    setPermission(Notification.permission)
+  }, [])
 
   React.useEffect(() => {
     if (typeof window === "undefined" || typeof Notification === "undefined") return

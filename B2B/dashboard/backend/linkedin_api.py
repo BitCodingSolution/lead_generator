@@ -3000,7 +3000,14 @@ def _digest_tick() -> None:
     """Fire the daily digest once per day at/after 9am local. Called by
     the linkedin_poll_loop in main.py. The tick itself is idempotent
     (run_digest checks _digest_already_sent), so even at minute-1
-    precision we never double-fire."""
+    precision we never double-fire.
+
+    Off by default — set LINKEDIN_DIGEST_ENABLED=1 to receive the daily
+    summary email. Disabled per user request: the digest landed in their
+    own outreach inbox and was visual noise.
+    """
+    if os.environ.get("LINKEDIN_DIGEST_ENABLED", "0") != "1":
+        return
     now = dt.datetime.now()
     if now.hour < 9:
         return
@@ -3409,6 +3416,18 @@ def _poll_and_store() -> dict:
                 from_email=m.from_email, subject=m.subject,
             )
             if not lead_id:
+                continue
+            # Content-level dedup. UNIQUE(gmail_msg_id) catches a re-poll
+            # of the same physical mail, but cannot catch the case where
+            # the sender's mailer fires two copies of the same email
+            # with different Message-IDs (auto-responder retry, list
+            # double-trigger, etc). Identical (lead, from, subject, body)
+            # is treated as the same reply.
+            if con.execute(
+                "SELECT 1 FROM replies WHERE lead_id = ? AND from_email = ? "
+                "AND subject = ? AND body = ? LIMIT 1",
+                (lead_id, m.from_email or "", m.subject or "", m.body or ""),
+            ).fetchone():
                 continue
             counts["matched"] += 1
             classify_text = (m.body or m.snippet or "") + "\n" + (m.subject or "")
