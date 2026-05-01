@@ -487,7 +487,7 @@ async function handleGenerateReply(userInstruction = "") {
 
   let reply;
   if (backend === "bridge") {
-    const bridgeUrl = settings.bridgeUrl || "http://127.0.0.1:8765";
+    const bridgeUrl = settings.bridgeUrl || "http://127.0.0.1:8766";
     reply = await callBridgeRaw(
       bridgeUrl,
       buildReplySystemPrompt(style),
@@ -584,7 +584,7 @@ async function handleRefineReply(refineType, currentReply, userInstruction = "")
 
   let refined;
   if (backend === "bridge") {
-    const bridgeUrl = settings.bridgeUrl || "http://127.0.0.1:8765";
+    const bridgeUrl = settings.bridgeUrl || "http://127.0.0.1:8766";
     refined = await callBridgeRaw(
       bridgeUrl,
       buildReplySystemPrompt(style),
@@ -811,7 +811,7 @@ async function handleExtractPost(rawText, postUrl, styleAngle) {
 
   const callOnce = async (sysPrompt, usrPrompt) => {
     if (backend === "bridge") {
-      const bridgeUrl = settings.bridgeUrl || "http://127.0.0.1:8765";
+      const bridgeUrl = settings.bridgeUrl || "http://127.0.0.1:8766";
       return callBridgeRaw(bridgeUrl, sysPrompt, usrPrompt);
     }
     const apiKey = settings.claudeApiKey;
@@ -1501,7 +1501,7 @@ async function handleGeneratePost(options) {
 
   let raw;
   if (backend === "bridge") {
-    const bridgeUrl = settings.bridgeUrl || "http://127.0.0.1:8765";
+    const bridgeUrl = settings.bridgeUrl || "http://127.0.0.1:8766";
     raw = await callBridgeRaw(bridgeUrl, systemPrompt, userPrompt);
   } else {
     const apiKey = settings.claudeApiKey;

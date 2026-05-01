@@ -126,7 +126,18 @@ chrome.storage.local.get(
     document.querySelectorAll('input[name="claudeBackend"]').forEach((r) => {
       r.checked = r.value === backend;
     });
-    if (data.bridgeUrl) bridgeUrlInput.value = data.bridgeUrl;
+    if (data.bridgeUrl) {
+      // One-time migration: the bridge moved off :8765 (which conflicts
+      // with another local Next.js project) to :8766. Auto-upgrade any
+      // previously-saved value pointing at the old port so the user
+      // doesn't have to re-save the setting by hand.
+      let saved = data.bridgeUrl;
+      if (/:8765(\/|$)/.test(saved)) {
+        saved = saved.replace(":8765", ":8766");
+        chrome.storage.local.set({ bridgeUrl: saved });
+      }
+      bridgeUrlInput.value = saved;
+    }
     updateApiKeyVisibility(backend);
   }
 );
@@ -206,7 +217,7 @@ async function refreshBridgeHealth() {
     }
 
     const url =
-      (settings.bridgeUrl || "http://127.0.0.1:8765").replace(/\/$/, "") +
+      (settings.bridgeUrl || "http://127.0.0.1:8766").replace(/\/$/, "") +
       "/health";
 
     const ctrl = new AbortController();
@@ -464,7 +475,7 @@ saveBackendBtn.addEventListener("click", async () => {
   const backend =
     document.querySelector('input[name="claudeBackend"]:checked')?.value ||
     "bridge";
-  const url = (bridgeUrlInput.value || "").trim() || "http://127.0.0.1:8765";
+  const url = (bridgeUrlInput.value || "").trim() || "http://127.0.0.1:8766";
   await chrome.storage.local.set({ claudeBackend: backend, bridgeUrl: url });
   backendStatus.textContent = `✓ Backend set to: ${backend === "bridge" ? "Local Bridge" : "Direct API"}`;
   backendStatus.classList.remove("error");
@@ -473,7 +484,7 @@ saveBackendBtn.addEventListener("click", async () => {
 });
 
 testBridgeBtn.addEventListener("click", async () => {
-  const url = (bridgeUrlInput.value || "").trim() || "http://127.0.0.1:8765";
+  const url = (bridgeUrlInput.value || "").trim() || "http://127.0.0.1:8766";
   backendStatus.textContent = "Testing bridge…";
   backendStatus.classList.remove("error");
   try {
