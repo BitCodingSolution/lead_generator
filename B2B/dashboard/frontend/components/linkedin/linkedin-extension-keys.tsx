@@ -4,6 +4,7 @@ import * as React from "react"
 import useSWR, { mutate } from "swr"
 import { KeyRound, Copy, Trash2, Plus, Check } from "lucide-react"
 import { api, swrFetcher } from "@/lib/api"
+import { fmtDateShort } from "@/lib/datetime"
 
 type KeyRow = {
   key: string
@@ -117,11 +118,11 @@ export function LinkedInExtensionKeys() {
                 <div className="text-[11px] text-zinc-500 tnum">
                   <code className="font-mono">{maskKey(r.key)}</code>
                   <span className="mx-1.5">·</span>
-                  Created {fmtDate(r.created_at)}
+                  Created {fmtDateShort(r.created_at)}
                   {r.last_used_at && (
                     <>
                       <span className="mx-1.5">·</span>
-                      Last used {fmtDate(r.last_used_at)}
+                      Last used {fmtDateShort(r.last_used_at)}
                     </>
                   )}
                 </div>
@@ -157,14 +158,4 @@ export function LinkedInExtensionKeys() {
 function maskKey(k: string): string {
   if (k.length <= 12) return k
   return `${k.slice(0, 6)}…${k.slice(-4)}`
-}
-function fmtDate(iso: string): string {
-  try {
-    return new Date(iso).toLocaleDateString(undefined, {
-      month: "short",
-      day: "numeric",
-    })
-  } catch {
-    return iso
-  }
 }

@@ -3,6 +3,7 @@
 import * as React from "react"
 import { PageHeader } from "@/components/page-header"
 import { LinkedInSafetyCard } from "@/components/linkedin/linkedin-safety-card"
+import { LinkedInRuntimeSettings } from "@/components/linkedin/linkedin-runtime-settings"
 import { LinkedInGmailConnect } from "@/components/linkedin/linkedin-gmail-connect"
 import { LinkedInExtensionKeys } from "@/components/linkedin/linkedin-extension-keys"
 import { LinkedInMaintenance } from "@/components/linkedin/linkedin-maintenance"
@@ -10,16 +11,17 @@ import { LinkedInAutopilotStatus } from "@/components/linkedin/linkedin-autopilo
 import { LinkedInBlocklistCard } from "@/components/linkedin/linkedin-blocklist-card"
 import { LinkedInCVsCard } from "@/components/linkedin/linkedin-cvs-card"
 import { LinkedInDnsCard } from "@/components/linkedin/linkedin-dns-card"
-import { Puzzle, Mail, Shield, Ban, FileText, Wrench, KeyRound, Download, ShieldCheck } from "lucide-react"
+import { Puzzle, Mail, Shield, Ban, FileText, Wrench, KeyRound, Download, ShieldCheck, Sliders } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { api } from "@/lib/api"
 
 type SectionId =
-  | "gmail" | "safety" | "keys" | "blocklist" | "cvs" | "dns" | "maintenance" | "install"
+  | "gmail" | "safety" | "runtime" | "keys" | "blocklist" | "cvs" | "dns" | "maintenance" | "install"
 
 const SECTIONS: { id: SectionId; label: string; icon: React.ReactNode }[] = [
   { id: "gmail", label: "Gmail", icon: <Mail className="size-3.5" /> },
   { id: "safety", label: "Safety & Autopilot", icon: <Shield className="size-3.5" /> },
+  { id: "runtime", label: "Runtime toggles", icon: <Sliders className="size-3.5" /> },
   { id: "cvs", label: "CV library", icon: <FileText className="size-3.5" /> },
   { id: "blocklist", label: "Blocklist", icon: <Ban className="size-3.5" /> },
   { id: "dns", label: "Domain auth", icon: <ShieldCheck className="size-3.5" /> },
@@ -92,6 +94,10 @@ export default function LinkedInSettingsPage() {
           <LinkedInSafetyCard />
           <LinkedInAutopilotStatus />
         </div>
+      </Section>
+
+      <Section id="runtime" title="Runtime toggles">
+        <LinkedInRuntimeSettings />
       </Section>
 
       <Section id="cvs" title="CV library">

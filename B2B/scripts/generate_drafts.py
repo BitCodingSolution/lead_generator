@@ -17,12 +17,15 @@ import os
 import random
 import re
 import sqlite3
+import os
 import sys
 import time
 import pandas as pd
 import requests
 
-BRIDGE_URL = "http://127.0.0.1:8765/generate-reply"
+# Bridge URL is env-overridable so a port move doesn't need a source edit.
+# Default lines up with the dashboard backend (linkedin_claude.py).
+BRIDGE_URL = os.environ.get("BRIDGE_URL", "http://127.0.0.1:8766/generate-reply")
 DB = r'H:/Lead Generator/B2B/Database/Marcel Data/leads.db'
 
 # Industry -> primary case study + hook for German SME owners.

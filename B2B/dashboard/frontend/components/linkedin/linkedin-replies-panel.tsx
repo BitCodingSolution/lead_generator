@@ -7,6 +7,7 @@ import {
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { api, swrFetcher } from "@/lib/api"
+import { fmtDateTime } from "@/lib/datetime"
 import { LinkedInLeadDrawer } from "./linkedin-lead-drawer"
 
 type ReplyRow = {
@@ -312,7 +313,7 @@ export function LinkedInRepliesPanel() {
                     {r.from_email || "(unknown sender)"}
                   </span>
                   <span className="ml-auto text-[11px] text-zinc-500 tnum">
-                    {fmtDate(r.received_at)}
+                    {fmtDateTime(r.received_at)}
                   </span>
                 </div>
                 <div className="mt-1 text-sm text-zinc-300 truncate">
@@ -366,16 +367,3 @@ export function LinkedInRepliesPanel() {
   )
 }
 
-function fmtDate(iso: string): string {
-  try {
-    const d = new Date(iso)
-    return d.toLocaleString(undefined, {
-      month: "short",
-      day: "numeric",
-      hour: "2-digit",
-      minute: "2-digit",
-    })
-  } catch {
-    return iso
-  }
-}

@@ -28,15 +28,32 @@ BRIDGE_TIMEOUT_S = 180
 
 # ---- Feature switches ------------------------------------------------------
 # These gate the extra Claude calls we layer on top of the main drafter. Each
-# extra call roughly doubles per-lead token spend, so they are kept opt-outable
-# via env vars for when cost or latency matters more than quality. Default ON
-# because the whole point of the LinkedIn flow is quality > throughput.
-ENABLE_PLAN_STEP = os.environ.get("LINKEDIN_DRAFT_PLAN", "1") != "0"
-ENABLE_CRITIQUE  = os.environ.get("LINKEDIN_DRAFT_CRITIQUE", "1") != "0"
-ENABLE_STATS_HINTS = os.environ.get("LINKEDIN_DRAFT_STATS_HINTS", "1") != "0"
-# Best-effort homepage fetch + meta-description extract per company.
-# Adds ~0-4s to the first draft for a given company (cached after).
-ENABLE_ENRICHMENT = os.environ.get("LINKEDIN_DRAFT_ENRICHMENT", "1") != "0"
+# extra call roughly doubles per-lead token spend, so the user can flip any
+# off from the Settings page. Reads go through linkedin_db.get_setting_bool
+# which honours DB > env > default — env still works as a one-off override.
+# Default ON: the whole point of the LinkedIn flow is quality > throughput.
+
+def _flag(key: str, env_key: str) -> bool:
+    # Lazy-import linkedin_db to avoid a circular import (linkedin_db is
+    # tiny but linkedin_claude is imported very early during app startup).
+    import linkedin_db  # noqa: WPS433
+    return linkedin_db.get_setting_bool(key, env_key=env_key, default=True)
+
+
+def is_plan_step_enabled() -> bool:
+    return _flag("linkedin.draft.plan", "LINKEDIN_DRAFT_PLAN")
+
+
+def is_critique_enabled() -> bool:
+    return _flag("linkedin.draft.critique", "LINKEDIN_DRAFT_CRITIQUE")
+
+
+def is_stats_hints_enabled() -> bool:
+    return _flag("linkedin.draft.stats_hints", "LINKEDIN_DRAFT_STATS_HINTS")
+
+
+def is_enrichment_enabled() -> bool:
+    return _flag("linkedin.draft.enrichment", "LINKEDIN_DRAFT_ENRICHMENT")
 
 
 class BridgeUnreachable(Exception):
@@ -51,13 +68,18 @@ class BridgeParseError(Exception):
 
 
 def bridge_is_up(timeout: float = 1.5) -> bool:
-    """Cheap health probe. Returns True if the Bridge answers on /. Used
-    by batch-drafter preflight so we don't spawn a worker that would
-    immediately refuse every lead."""
+    """Cheap health probe. Returns True only when OUR bridge answers on
+    /health with the expected service-name signature. Used by batch-drafter
+    preflight so we don't spawn a worker that would immediately refuse
+    every lead — and to catch port-squatters (a foreign process answering
+    on :8766 must NOT be treated as a healthy bridge)."""
     try:
-        r = requests.get("http://127.0.0.1:8766/", timeout=timeout)
-        return 200 <= r.status_code < 500
-    except requests.exceptions.RequestException:
+        r = requests.get("http://127.0.0.1:8766/health", timeout=timeout)
+        if r.status_code != 200:
+            return False
+        body = r.json()
+        return str(body.get("service", "")).startswith("LinkedIn Smart Search")
+    except (requests.exceptions.RequestException, ValueError):
         return False
 
 
@@ -403,7 +425,7 @@ def _enrichment_block(company: str) -> str:
     The drafter is told to use the snippet for hook flavour but NOT to
     quote it verbatim — a recipient seeing their own marketing copy
     pasted back at them is the worst possible 'personalisation'."""
-    if not ENABLE_ENRICHMENT or not (company or "").strip():
+    if not is_enrichment_enabled() or not (company or "").strip():
         return ""
     try:
         from linkedin_enrich import enrich_company
@@ -424,7 +446,7 @@ def _stats_hint_block(stats: Optional[dict]) -> str:
     """Convert /outreach-stats output into a short 'avoid' block for the
     drafter. We only warn on buckets with enough volume to be signal (>=5
     sends) AND a reply rate meaningfully below the baseline."""
-    if not stats or not ENABLE_STATS_HINTS:
+    if not stats or not is_stats_hints_enabled():
         return ""
     base = float(stats.get("totals", {}).get("reply_rate_pct", 0) or 0)
     if base <= 0:
@@ -485,7 +507,7 @@ def _critique(subject: str, body: str) -> tuple[bool, list[str]]:
     """Best-effort critique. Returns (ok, violations). On Bridge error we
     pass it through as ok=True so a transient failure doesn't block the
     batch — the drafter's own sanitiser still runs downstream."""
-    if not ENABLE_CRITIQUE:
+    if not is_critique_enabled():
         return True, []
     user_msg = (
         "DRAFT TO CHECK\n--------------\n"
@@ -538,7 +560,7 @@ def generate_draft(
 
     # Step 1: generate a plan (optional, costs an extra Bridge call).
     plan: Optional[dict] = None
-    if ENABLE_PLAN_STEP:
+    if is_plan_step_enabled():
         plan = _generate_plan(
             posted_by=posted_by, company=company, role=role,
             tech_stack=tech_stack, location=location, post_text=post_text,

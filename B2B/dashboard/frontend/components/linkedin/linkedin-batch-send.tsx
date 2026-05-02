@@ -8,6 +8,7 @@ import {
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { api, swrFetcher } from "@/lib/api"
+import { elapsedSec, fmtDuration, fmtRelative } from "@/lib/datetime"
 
 type BatchState = {
   running: boolean
@@ -426,36 +427,10 @@ function Pill({
   )
 }
 
-function elapsedSec(iso: string | null | undefined): number {
-  if (!iso) return 0
-  return Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 1000))
-}
-
 function etaSec(data: BatchState | undefined, done: number): number {
   if (!data || !data.started_at || done <= 0 || data.total === 0) return 0
   const elapsed = elapsedSec(data.started_at)
   const avgPerLead = elapsed / done
   const remaining = data.total - done
   return Math.max(0, Math.floor(avgPerLead * remaining))
-}
-
-function fmtDuration(sec: number): string {
-  if (!sec) return "—"
-  const m = Math.floor(sec / 60)
-  const s = sec % 60
-  if (m === 0) return `${s}s`
-  if (m < 60) return `${m}m ${s.toString().padStart(2, "0")}s`
-  const h = Math.floor(m / 60)
-  return `${h}h ${(m % 60).toString().padStart(2, "0")}m`
-}
-
-function fmtRelative(iso: string): string {
-  const diff = Date.now() - new Date(iso).getTime()
-  if (diff < 0) return "—"
-  const m = Math.floor(diff / 60_000)
-  if (m < 1) return "just now"
-  if (m < 60) return `${m}m ago`
-  const h = Math.floor(m / 60)
-  if (h < 24) return `${h}h ago`
-  return `${Math.floor(h / 24)}d ago`
 }

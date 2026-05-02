@@ -32,6 +32,7 @@ const keyStatus = document.getElementById("keyStatus");
 const bridgeUrlInput = document.getElementById("bridgeUrlInput");
 const saveBackendBtn = document.getElementById("saveBackendBtn");
 const testBridgeBtn = document.getElementById("testBridgeBtn");
+const syncFromDashboardBtn = document.getElementById("syncFromDashboardBtn");
 const backendStatus = document.getElementById("backendStatus");
 const signOffInput = document.getElementById("signOffInput");
 const toneSelect = document.getElementById("toneSelect");
@@ -482,6 +483,40 @@ saveBackendBtn.addEventListener("click", async () => {
   updateApiKeyVisibility(backend);
   refreshBridgeHealth();
 });
+
+async function fetchBridgeFromDashboard() {
+  // Hit the dashboard's bootstrap endpoint to learn where the bridge is
+  // currently listening. The endpoint is loopback-only on the backend so
+  // this only works on the same machine — fine for the local-dev model.
+  // Returns null on any failure (caller decides how loud to be).
+  const { dashboardBaseUrl } = await chrome.storage.local.get(["dashboardBaseUrl"]);
+  const base = (dashboardBaseUrl || "http://localhost:8900").replace(/\/$/, "");
+  try {
+    const res = await fetch(`${base}/api/_bootstrap`, { method: "GET" });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data && typeof data.bridge_url === "string" ? data.bridge_url : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+if (syncFromDashboardBtn) {
+  syncFromDashboardBtn.addEventListener("click", async () => {
+    backendStatus.textContent = "Asking dashboard for bridge URL…";
+    backendStatus.classList.remove("error");
+    const url = await fetchBridgeFromDashboard();
+    if (!url) {
+      backendStatus.textContent = "Couldn't reach dashboard /api/_bootstrap";
+      backendStatus.classList.add("error");
+      return;
+    }
+    bridgeUrlInput.value = url;
+    await chrome.storage.local.set({ bridgeUrl: url });
+    backendStatus.textContent = `✓ Bridge URL synced from dashboard: ${url}`;
+    refreshBridgeHealth();
+  });
+}
 
 testBridgeBtn.addEventListener("click", async () => {
   const url = (bridgeUrlInput.value || "").trim() || "http://127.0.0.1:8766";

@@ -792,7 +792,7 @@ def run_digest(force: bool = False):
             f"  {top_lead['posted_by'] or '?'} at {top_lead['company'] or '?'} "
             f"({top_lead['role'] or '?'}) - fit {top_lead['fit_score'] or '-'}"
         )
-        lines.append(f"  Open: https://b2b.bitcodingsolutions.com/linkedin/leads")
+        lines.append("  Open: https://b2b.bitcodingsolutions.com/linkedin/leads")
         lines.append("")
     lines.append("Open dashboard: https://b2b.bitcodingsolutions.com/linkedin")
     body = "\n".join(lines)

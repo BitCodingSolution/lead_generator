@@ -348,7 +348,7 @@ export function MarcelPipelinePanel() {
 
   return (
     <div className="space-y-6">
-      <PendingDraftsBanner onAction={runSecondary} jobRunning={jobRunning} />
+      <PendingDraftsBanner jobRunning={jobRunning} />
 
       {/* ===== MARCEL HERO CARD (DB-picked pipeline) ===== */}
       <motion.div
@@ -692,10 +692,8 @@ function Badge({
 }
 
 function PendingDraftsBanner({
-  onAction,
   jobRunning,
 }: {
-  onAction: (path: string, label: string) => Promise<void> | void
   jobRunning: boolean
 }) {
   const { data, mutate } = useSWR<{ count: number }>(

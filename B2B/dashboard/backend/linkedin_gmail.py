@@ -35,7 +35,6 @@ import imaplib
 import json
 import os
 import re
-import secrets
 import smtplib
 import ssl
 from dataclasses import dataclass

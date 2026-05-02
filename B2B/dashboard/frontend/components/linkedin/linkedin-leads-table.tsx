@@ -9,6 +9,7 @@ import {
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { api, swrFetcher } from "@/lib/api"
+import { fmtDateShort, fmtTimeShort, fmtWhen } from "@/lib/datetime"
 import type { LinkedInLead, LinkedInLeadsResponse } from "@/lib/types"
 import { LinkedInLeadDrawer } from "./linkedin-lead-drawer"
 
@@ -361,7 +362,7 @@ export function LinkedInLeadsTable({
                           title={`Scheduled to send at ${r.scheduled_send_at}`}
                         >
                           <Clock className="size-2.5" />
-                          {fmtScheduled(r.scheduled_send_at)}
+                          {fmtWhen(r.scheduled_send_at)}
                         </span>
                       )}
                       {r.ooo_nudge_at && !r.ooo_nudge_sent_at && (
@@ -370,7 +371,7 @@ export function LinkedInLeadsTable({
                           title={`OOO nudge auto-scheduled for ${r.ooo_nudge_at}`}
                         >
                           <Clock className="size-2.5" />
-                          nudge {fmtScheduled(r.ooo_nudge_at)}
+                          nudge {fmtWhen(r.ooo_nudge_at)}
                         </span>
                       )}
                       {r.cv_missing && (
@@ -404,9 +405,9 @@ export function LinkedInLeadsTable({
                     <NotesCell lead={r} />
                   </Td>
                   <Td className="text-xs text-zinc-500 tnum whitespace-nowrap">
-                    <div>{fmtDate(r.first_seen_at)}</div>
+                    <div>{fmtDateShort(r.first_seen_at)}</div>
                     <div className="text-[10px] text-zinc-600">
-                      {fmtTime(r.first_seen_at)}
+                      {fmtTimeShort(r.first_seen_at)}
                     </div>
                   </Td>
                   <Td className="text-right pr-3">
@@ -783,41 +784,3 @@ function EmptyRows({ loading }: { loading: boolean }) {
   )
 }
 
-function fmtScheduled(iso: string): string {
-  try {
-    const d = new Date(iso)
-    const now = new Date()
-    const sameDay = d.toDateString() === now.toDateString()
-    if (sameDay) {
-      return d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })
-    }
-    return d.toLocaleString(undefined, {
-      month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
-    })
-  } catch {
-    return iso
-  }
-}
-
-function fmtDate(iso: string): string {
-  try {
-    return new Date(iso).toLocaleDateString(undefined, {
-      month: "short",
-      day: "numeric",
-    })
-  } catch {
-    return iso
-  }
-}
-
-function fmtTime(iso: string): string {
-  try {
-    return new Date(iso).toLocaleTimeString(undefined, {
-      hour: "2-digit",
-      minute: "2-digit",
-      hour12: false,
-    })
-  } catch {
-    return ""
-  }
-}

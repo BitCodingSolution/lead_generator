@@ -4,6 +4,7 @@ import useSWR from "swr"
 import { Power } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { swrFetcher } from "@/lib/api"
+import { fmtDateTime, fmtRelative } from "@/lib/datetime"
 
 type Status = {
   enabled: boolean
@@ -56,7 +57,7 @@ export function LinkedInAutopilotStatus() {
         />
         <Row
           label="Next fire"
-          value={data?.enabled ? fmtAbs(data.next_fire_at) : "—"}
+          value={data?.enabled ? fmtDateTime(data.next_fire_at) : "—"}
         />
       </div>
     </div>
@@ -79,26 +80,3 @@ function Row({ label, value }: { label: string; value: string }) {
   )
 }
 
-function fmtRelative(iso: string | null | undefined): string {
-  if (!iso) return "—"
-  const diff = Date.now() - new Date(iso).getTime()
-  if (diff < 0) return fmtAbs(iso)
-  const m = Math.floor(diff / 60_000)
-  if (m < 1) return "just now"
-  if (m < 60) return `${m}m ago`
-  const h = Math.floor(m / 60)
-  if (h < 24) return `${h}h ago`
-  return `${Math.floor(h / 24)}d ago`
-}
-
-function fmtAbs(iso: string | null | undefined): string {
-  if (!iso) return "—"
-  try {
-    return new Date(iso).toLocaleString(undefined, {
-      month: "short",
-      day: "numeric",
-      hour: "2-digit",
-      minute: "2-digit",
-    })
-  } catch { return iso }
-}

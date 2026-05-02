@@ -34,15 +34,20 @@ const STATE_META: Record<
 const DISMISSED_KEY = "batches-panel.dismissed"
 
 function useDismissedBatches() {
-  const [dismissed, setDismissed] = React.useState<Set<string>>(() => {
-    if (typeof window === "undefined") return new Set()
+  // Start empty on both server and first client render so the hydrated
+  // tree matches SSR. The real saved set is loaded in a mount effect
+  // below, which then triggers a re-render. Reading localStorage in the
+  // useState initializer would cause a hydration mismatch (server sees
+  // empty, client sees the stored items).
+  const [dismissed, setDismissed] = React.useState<Set<string>>(() => new Set())
+  React.useEffect(() => {
     try {
       const raw = window.localStorage.getItem(DISMISSED_KEY)
-      return new Set<string>(raw ? JSON.parse(raw) : [])
+      if (raw) setDismissed(new Set<string>(JSON.parse(raw)))
     } catch {
-      return new Set<string>()
+      /* corrupted JSON or storage blocked — keep the empty default */
     }
-  })
+  }, [])
   const persist = React.useCallback((next: Set<string>) => {
     setDismissed(next)
     try {

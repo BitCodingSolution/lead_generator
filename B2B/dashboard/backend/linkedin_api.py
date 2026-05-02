@@ -18,14 +18,13 @@ import random
 import re
 import secrets
 import threading
-import time
 from typing import Optional
 
-import requests
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 from fastapi.responses import Response
 from pydantic import BaseModel, Field, field_validator
 
+import linkedin_db
 from linkedin_db import connect, init
 from linkedin_claude import (
     BridgeParseError,
@@ -648,6 +647,103 @@ def get_safety() -> SafetyState:
                 r["followups_hour"] if "followups_hour" in r.keys() else 11
             ) or 11,
         )
+
+
+# ---- Runtime settings (kv_settings table) ---------------------------------
+# Surface the env-only flags that previously required a backend restart.
+# Each entry is {key, label, type, env_key, default} so the frontend can
+# render the right input + tooltip without hard-coding the schema.
+
+_RUNTIME_SETTINGS = [
+    {
+        "key": "linkedin.digest.enabled",
+        "label": "Daily outreach digest email",
+        "type": "bool",
+        "env_key": "LINKEDIN_DIGEST_ENABLED",
+        "default": False,
+        "help": "9am summary of yesterday's sent/replies/bounces. Off by default — landed in your own inbox as noise.",
+    },
+    {
+        "key": "linkedin.draft.plan",
+        "label": "Drafter: planning step",
+        "type": "bool",
+        "env_key": "LINKEDIN_DRAFT_PLAN",
+        "default": True,
+        "help": "Extra Claude call that picks angle + hook before writing. ~2x token cost. Worth it for quality.",
+    },
+    {
+        "key": "linkedin.draft.critique",
+        "label": "Drafter: critique step",
+        "type": "bool",
+        "env_key": "LINKEDIN_DRAFT_CRITIQUE",
+        "default": True,
+        "help": "Extra Claude call that critiques + rewrites the draft. ~2x token cost.",
+    },
+    {
+        "key": "linkedin.draft.stats_hints",
+        "label": "Drafter: stats-aware hints",
+        "type": "bool",
+        "env_key": "LINKEDIN_DRAFT_STATS_HINTS",
+        "default": True,
+        "help": "Feeds reply-rate/bounce stats into the prompt so Claude steers away from low-performing patterns.",
+    },
+    {
+        "key": "linkedin.draft.enrichment",
+        "label": "Drafter: company enrichment",
+        "type": "bool",
+        "env_key": "LINKEDIN_DRAFT_ENRICHMENT",
+        "default": True,
+        "help": "Best-effort homepage fetch + meta-description per company. Adds 0-4s on first draft, cached after.",
+    },
+]
+
+
+@router.get("/runtime-settings")
+def list_runtime_settings():
+    """Return the descriptor + current value for each runtime-toggleable
+    setting. The frontend uses descriptor.type to render the right input."""
+    out = []
+    for s in _RUNTIME_SETTINGS:
+        if s["type"] == "bool":
+            value = linkedin_db.get_setting_bool(
+                s["key"], env_key=s.get("env_key"), default=s["default"],
+            )
+        elif s["type"] == "int":
+            value = linkedin_db.get_setting_int(
+                s["key"], env_key=s.get("env_key"), default=s["default"],
+            )
+        else:
+            value = linkedin_db.get_setting_raw(s["key"]) or s["default"]
+        out.append({**s, "value": value})
+    return {"settings": out}
+
+
+class RuntimeSettingUpdate(BaseModel):
+    key: str
+    value: object  # bool | int | str — coerced per descriptor
+
+
+@router.post("/runtime-settings")
+def update_runtime_setting(payload: RuntimeSettingUpdate):
+    """Set one runtime setting. Rejects unknown keys so a typo can't
+    silently bloat the kv_settings table with junk."""
+    desc = next((s for s in _RUNTIME_SETTINGS if s["key"] == payload.key), None)
+    if desc is None:
+        raise HTTPException(400, f"Unknown setting key: {payload.key}")
+    if desc["type"] == "bool":
+        as_str = "true" if bool(payload.value) else "false"
+    elif desc["type"] == "int":
+        try:
+            as_str = str(int(payload.value))  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            raise HTTPException(400, f"value for {payload.key} must be int")
+    else:
+        as_str = str(payload.value)
+    linkedin_db.set_setting_raw(payload.key, as_str)
+    with connect() as con:
+        _log_event(con, "runtime_setting", meta={"key": payload.key, "value": as_str})
+        con.commit()
+    return {"ok": True, "key": payload.key, "value": as_str}
 
 
 @router.post("/autopilot/reset-today")
@@ -2179,11 +2275,6 @@ def draft_reply(lead_id: int, payload: Optional[DraftReplyBody] = None):
     return {"body": draft, "used_hint": bool(hint), "style_examples_used": len(examples)}
 
 
-def _first_name_from_posted_by(raw: str) -> str:
-    s = (raw or "").strip().split()
-    return s[0].capitalize() if s else ""
-
-
 class SendReplyBody(BaseModel):
     body: str = Field(min_length=5, max_length=20_000)
     subject: Optional[str] = None  # defaults to "Re: <original subject>"
@@ -3002,11 +3093,15 @@ def _digest_tick() -> None:
     (run_digest checks _digest_already_sent), so even at minute-1
     precision we never double-fire.
 
-    Off by default — set LINKEDIN_DIGEST_ENABLED=1 to receive the daily
-    summary email. Disabled per user request: the digest landed in their
-    own outreach inbox and was visual noise.
+    Off by default. Toggle from the Settings page (or set
+    LINKEDIN_DIGEST_ENABLED=1 — env still works as a one-off override).
+    Disabled per user request: the digest landed in their own outreach
+    inbox and was visual noise.
     """
-    if os.environ.get("LINKEDIN_DIGEST_ENABLED", "0") != "1":
+    if not linkedin_db.get_setting_bool(
+        "linkedin.digest.enabled", env_key="LINKEDIN_DIGEST_ENABLED",
+        default=False,
+    ):
         return
     now = dt.datetime.now()
     if now.hour < 9:
@@ -3273,60 +3368,14 @@ def list_replies(
         return {"rows": rows[:limit]}
 
 
-def _match_reply_to_lead(con, in_reply_to: str, references: str,
-                         from_email: str = "", subject: str = "") -> Optional[int]:
-    """Find the lead that this inbound message is a reply to.
-
-    Tiered match:
-      1) Exact match on sent_message_id via In-Reply-To / References —
-         works when Gmail preserves our Message-ID (rare).
-      2) Fallback: from_email matches a Sent lead's recipient AND the
-         inbound subject is "Re: <lead.gen_subject>" (case-insensitive,
-         whitespace-tolerant). Handles the common case where Gmail
-         rewrote the outbound Message-ID so threading headers don't
-         match our stored id."""
-    candidates: list[str] = []
-    if in_reply_to:
-        candidates.append(in_reply_to.strip("<>").strip())
-    for ref in re.split(r"\s+", references or ""):
-        ref = ref.strip().strip("<>")
-        if ref:
-            candidates.append(ref)
-    if candidates:
-        placeholders = ",".join(["?"] * len(candidates))
-        row = con.execute(
-            f"SELECT id FROM leads WHERE sent_message_id IN ({placeholders}) LIMIT 1",
-            candidates,
-        ).fetchone()
-        if row:
-            return row["id"]
-
-    # Fallback — match by sender + subject.
-    mail = (from_email or "").strip().lower()
-    subj = (subject or "").strip()
-    if not mail or not subj:
-        return None
-    # Strip common "Re: " / "Fwd:" prefixes, collapse whitespace.
-    cleaned = re.sub(r"^\s*(re|fwd?|fw)\s*:\s*", "", subj, flags=re.IGNORECASE)
-    cleaned_norm = re.sub(r"\s+", " ", cleaned).strip().lower()
-    if not cleaned_norm:
-        return None
-    row = con.execute(
-        "SELECT id, gen_subject FROM leads "
-        "WHERE status IN ('Sent', 'Replied') "
-        "  AND LOWER(TRIM(email)) = ? "
-        "  AND gen_subject IS NOT NULL "
-        "ORDER BY sent_at DESC",
-        (mail,),
-    ).fetchall()
-    for r in row:
-        gs = re.sub(r"\s+", " ", (r["gen_subject"] or "")).strip().lower()
-        if gs and (gs == cleaned_norm or cleaned_norm.startswith(gs) or gs.startswith(cleaned_norm)):
-            return r["id"]
-    # Last resort: if the sender matches exactly one Sent lead, use that.
-    if len(row) == 1:
-        return row[0]["id"]
-    return None
+# _match_reply_to_lead and _first_name_from_posted_by were moved into
+# linkedin_reply_match.py so they can be unit-tested without dragging the
+# whole FastAPI import graph along. The aliases below preserve the
+# private-name call sites elsewhere in this module.
+from linkedin_reply_match import (  # noqa: E402
+    match_reply_to_lead as _match_reply_to_lead,
+    first_name_from_posted_by as _first_name_from_posted_by,
+)
 
 
 def _auto_draft_for_reply(reply_id: int, lead_id: int) -> None:
@@ -3577,7 +3626,6 @@ def _poll_and_store() -> dict:
     # the DB transaction open for seconds. Uses default daemon=True so
     # these don't block app shutdown.
     for reply_id, lead_id in new_reply_ids_for_drafting:
-        import threading
         t = threading.Thread(
             target=_auto_draft_for_reply,
             args=(reply_id, lead_id),

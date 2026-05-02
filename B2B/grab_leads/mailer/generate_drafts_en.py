@@ -33,12 +33,17 @@ import sys
 import time
 from pathlib import Path
 
+import os
+
 import pandas as pd
 import requests
 
 
-BRIDGE_URL = "http://127.0.0.1:8765/generate-reply"
-BRIDGE_HEALTH = "http://127.0.0.1:8765/health"
+# Env-overridable. BRIDGE_BASE feeds both URLs so callers only set one var.
+# Default matches the dashboard backend (linkedin_claude.py).
+_BRIDGE_BASE = os.environ.get("BRIDGE_BASE", "http://127.0.0.1:8766")
+BRIDGE_URL = f"{_BRIDGE_BASE}/generate-reply"
+BRIDGE_HEALTH = f"{_BRIDGE_BASE}/health"
 
 SIGNATURE = """\
 Best,

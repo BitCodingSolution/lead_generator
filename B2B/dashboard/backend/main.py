@@ -20,7 +20,7 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -202,9 +202,9 @@ register_source(Source(
 app.include_router(sources_router)
 
 # ---- Verbose validation-error logging so we can debug extension payloads.
-from fastapi import Request  # noqa: E402
+# Request and JSONResponse are imported at the top of the file; only the
+# exception type is new here.
 from fastapi.exceptions import RequestValidationError  # noqa: E402
-from fastapi.responses import JSONResponse  # noqa: E402
 
 
 @app.exception_handler(RequestValidationError)
@@ -1841,11 +1841,9 @@ def preflight():
     checks: list[dict] = []
 
     # DB reachable
-    db_ok = True
     try:
         q_one("SELECT 1")
     except Exception as e:
-        db_ok = False
         checks.append({"key": "db", "ok": False, "error": str(e)[:200]})
     else:
         checks.append({"key": "db", "ok": True})
@@ -2256,21 +2254,38 @@ def bootstrap(request: Request):
     ip = request.client.host if request.client else ""
     if ip not in ("127.0.0.1", "::1", "localhost"):
         raise HTTPException(403, "Bootstrap is loopback-only.")
-    return {"api_key": API_KEY, "auth_required": REQUIRE_AUTH}
+    # Surface the bridge URL alongside the API key so the Chrome extension
+    # can self-configure at install time instead of the user pasting it.
+    # The dashboard is the source of truth — if the bridge port moves
+    # again, only this constant changes here and the extension picks it up
+    # on next popup open.
+    return {
+        "api_key": API_KEY,
+        "auth_required": REQUIRE_AUTH,
+        "bridge_url": "http://127.0.0.1:8766",
+    }
 
 
 BRIDGE_DIR = Path(r"H:/Lead Generator/Bridge")
 
 
 def _ping_bridge(timeout: float = 1.5) -> bool:
+    """Detect whether OUR bridge is reachable on :8766. Hits /health and
+    requires the service-name signature in the body — a bare 200/4xx isn't
+    enough, because another local process can squat the port and answer
+    with their own content (this happened once when a Next.js dev server
+    grabbed :8765, leaving the topbar showing green while every drafter
+    call 404'd)."""
+    import json as _json
     import urllib.error
     import urllib.request
     try:
-        req = urllib.request.Request("http://127.0.0.1:8766/", method="GET")
+        req = urllib.request.Request("http://127.0.0.1:8766/health", method="GET")
         with urllib.request.urlopen(req, timeout=timeout) as r:
-            return 200 <= r.status < 500
-    except urllib.error.HTTPError as e:
-        return e.code < 500  # any response means server is up
+            if r.status != 200:
+                return False
+            payload = _json.loads(r.read().decode("utf-8", errors="replace"))
+            return (payload.get("service") or "").startswith("LinkedIn Smart Search")
     except Exception:
         return False
 

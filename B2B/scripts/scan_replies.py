@@ -12,12 +12,16 @@ import os
 import re
 import sqlite3
 import sys
+import os
+
 import requests
 import win32com.client
 
 DB = r'H:/Lead Generator/B2B/Database/Marcel Data/leads.db'
 FROM_EMAIL = 'pradip@bitcodingsolutions.com'
-BRIDGE_URL = 'http://127.0.0.1:8765/generate-reply'
+# Env-overridable so a port move doesn't need a source edit. Default
+# matches the dashboard backend (linkedin_claude.py).
+BRIDGE_URL = os.environ.get('BRIDGE_URL', 'http://127.0.0.1:8766/generate-reply')
 
 
 SENTIMENT_PROMPT = """Du klassifizierst deutsche B2B Email-Antworten aus Cold-Outreach.

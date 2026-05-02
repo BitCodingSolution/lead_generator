@@ -8,6 +8,7 @@ import {
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { api, swrFetcher } from "@/lib/api"
+import { fmtDateTime, fmtRelative, fmtWhen } from "@/lib/datetime"
 import type { LinkedInLead } from "@/lib/types"
 
 type LeadFull = LinkedInLead & {
@@ -316,7 +317,7 @@ export function LinkedInLeadDrawer({
                     {alreadySent ? (
                       <span className="inline-flex items-center gap-1 rounded bg-emerald-500/15 px-1.5 py-0.5 text-[10px] text-emerald-300">
                         <Check className="size-2.5" />
-                        Sent {lead.sent_at ? fmtRelativeTs(lead.sent_at) : ""}
+                        Sent {lead.sent_at ? fmtRelative(lead.sent_at) : ""}
                       </span>
                     ) : (
                       <button
@@ -525,7 +526,7 @@ function TimelineSection({ leadId }: { leadId: number }) {
             </span>
             <div className="min-w-0 flex-1">
               <span className="font-mono text-[11px] text-zinc-500 tnum">
-                {fmtTs(r.at)}
+                {fmtDateTime(r.at)}
               </span>
               <span className="ml-2 text-zinc-200">
                 {r.kind.replace(/_/g, " ")}
@@ -653,31 +654,6 @@ function DrawerEditField({
       </span>
     </button>
   )
-}
-
-function fmtTs(iso: string): string {
-  try {
-    return new Date(iso).toLocaleString(undefined, {
-      month: "short",
-      day: "numeric",
-      hour: "2-digit",
-      minute: "2-digit",
-    })
-  } catch { return iso }
-}
-
-function fmtRelativeTs(iso: string): string {
-  try {
-    const diffMs = Date.now() - new Date(iso).getTime()
-    if (diffMs < 0) return ""
-    const m = Math.floor(diffMs / 60_000)
-    if (m < 1) return "just now"
-    if (m < 60) return `${m}m ago`
-    const h = Math.floor(m / 60)
-    if (h < 24) return `${h}h ago`
-    const d = Math.floor(h / 24)
-    return `${d}d ago`
-  } catch { return "" }
 }
 
 function Facts({ lead }: { lead: LeadFull }) {
@@ -927,23 +903,6 @@ function PresetBtn({ label, onClick }: { label: string; onClick: () => void }) {
     </button>
   )
 }
-
-function fmtWhen(iso: string): string {
-  try {
-    const d = new Date(iso)
-    const now = new Date()
-    const sameDay = d.toDateString() === now.toDateString()
-    if (sameDay) {
-      return `today ${d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}`
-    }
-    return d.toLocaleString(undefined, {
-      month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
-    })
-  } catch {
-    return iso
-  }
-}
-
 
 // Quick templates — edit-in-place before sending. Kept short and matching
 // the cold-email style rules (no em-dashes, 60-120 words, minimal signoff).

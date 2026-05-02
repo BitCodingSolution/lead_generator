@@ -17,7 +17,7 @@ import datetime as dt
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, Optional
 
 BASE = Path(r"H:/Lead Generator/B2B")
 DB_PATH = BASE / "Database" / "LinkedIn Data" / "leads.db"
@@ -213,6 +213,19 @@ CREATE TABLE IF NOT EXISTS autopilot_runs (
   total_queued  INTEGER,
   status        TEXT NOT NULL              -- started | skipped_quiet | skipped_quota | skipped_paused | skipped_no_drafts
 );
+
+-- Generic key/value runtime settings. Used for flags that previously
+-- required restart-and-set-env (digest enabled, drafter feature switches).
+-- Kept narrow on purpose: structured config (gmail accounts, warmup curve)
+-- still lives on its purpose-built table, and bridge URL stays in env
+-- because it's read at uvicorn import time before this DB is open.
+--
+-- Values are stored as text — callers parse to bool/int as needed.
+CREATE TABLE IF NOT EXISTS kv_settings (
+  key        TEXT PRIMARY KEY,
+  value      TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
 """
 
 
@@ -237,6 +250,67 @@ def init() -> None:
         _migrate(con)
         ensure_safety_row(con)
         con.commit()
+
+
+# --- kv_settings helpers ---------------------------------------------------
+# Generic runtime config. Read with `get_setting(key, env_key, default)` —
+# the priority is DB > env > default. That ordering means an env var still
+# works (handy for one-off overrides at boot) but the UI-set value wins
+# for normal day-to-day toggling.
+
+
+def _now_iso() -> str:
+    return dt.datetime.now().isoformat(timespec="seconds")
+
+
+def get_setting_raw(key: str) -> Optional[str]:
+    """Return the raw stored string for `key`, or None if not set."""
+    with connect() as con:
+        r = con.execute(
+            "SELECT value FROM kv_settings WHERE key = ?", (key,),
+        ).fetchone()
+    return r["value"] if r else None
+
+
+def set_setting_raw(key: str, value: str) -> None:
+    """Upsert a raw string value. Caller is responsible for serialisation
+    (use 'true'/'false' for bools, str(int) for ints)."""
+    with connect() as con:
+        con.execute(
+            "INSERT INTO kv_settings (key, value, updated_at) "
+            "VALUES (?, ?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value, "
+            "  updated_at = excluded.updated_at",
+            (key, value, _now_iso()),
+        )
+        con.commit()
+
+
+def get_setting_bool(key: str, env_key: Optional[str] = None,
+                     default: bool = False) -> bool:
+    """Bool setting with env fallback. Truthy values: '1', 'true', 'yes',
+    'on' (case-insensitive). Anything else is False."""
+    raw = get_setting_raw(key)
+    if raw is None and env_key:
+        import os as _os
+        raw = _os.environ.get(env_key)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def get_setting_int(key: str, env_key: Optional[str] = None,
+                    default: int = 0) -> int:
+    raw = get_setting_raw(key)
+    if raw is None and env_key:
+        import os as _os
+        raw = _os.environ.get(env_key)
+    if raw is None:
+        return default
+    try:
+        return int(str(raw).strip())
+    except ValueError:
+        return default
 
 
 def _migrate(con) -> None:

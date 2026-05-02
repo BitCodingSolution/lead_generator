@@ -7,6 +7,7 @@ import {
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { api, swrFetcher } from "@/lib/api"
+import { fmtRelative, fmtTimeShort } from "@/lib/datetime"
 import type { LinkedInSafety } from "@/lib/types"
 
 const ENDPOINT = "/api/linkedin/safety"
@@ -341,7 +342,7 @@ export function LinkedInSafetyCard() {
               <div className="flex-1">
                 Already ran today at{" "}
                 <span className="font-mono">
-                  {fmtTime(data.autopilot_today.fired_at)}
+                  {fmtTimeShort(data.autopilot_today.fired_at)}
                 </span>
                 {" — "}
                 {data.autopilot_today.status === "started"
@@ -431,24 +432,3 @@ function Row({ label, value }: { label: string; value: string }) {
   )
 }
 
-function fmtTime(iso: string): string {
-  try {
-    return new Date(iso).toLocaleTimeString(undefined, {
-      hour: "2-digit", minute: "2-digit",
-    })
-  } catch {
-    return iso
-  }
-}
-
-function fmtRelative(iso: string | null | undefined): string {
-  if (!iso) return "—"
-  const diff = Date.now() - new Date(iso).getTime()
-  if (diff < 0) return "—"
-  const m = Math.floor(diff / 60_000)
-  if (m < 1) return "just now"
-  if (m < 60) return `${m}m ago`
-  const h = Math.floor(m / 60)
-  if (h < 24) return `${h}h ago`
-  return `${Math.floor(h / 24)}d ago`
-}

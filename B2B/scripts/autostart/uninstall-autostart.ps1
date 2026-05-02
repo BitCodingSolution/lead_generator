@@ -3,7 +3,7 @@
 
 $ErrorActionPreference = "Continue"
 
-foreach ($name in @("BitCoding-Backend", "BitCoding-Bridge", "BitCoding-Cloudflared")) {
+foreach ($name in @("BitCoding-Backend", "BitCoding-Bridge", "BitCoding-Cloudflared", "BitCoding-DBBackup")) {
     Unregister-ScheduledTask -TaskName $name -Confirm:$false -ErrorAction SilentlyContinue
     Write-Host "Removed: $name (or already absent)"
 }

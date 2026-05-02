@@ -40,15 +40,29 @@ See [docs/DEALFRONT-LEADS.md](docs/DEALFRONT-LEADS.md) for sample leads to test 
 
 ## Pushing to GitHub
 
-Remote lives at `github.com/BitCodingSolution/lead_generator` with this
-whole folder as the `B2B/` subfolder. Local `H:/Lead Generator/B2B/` is
-just the working tree — it no longer has its own `.git`. To publish:
+This folder is published to **two** remotes — keep both in sync.
 
-```bash
-bash scripts/sync_to_github.sh "your commit message"
-```
+1. **Personal repo** (`github.com/pradipkachhadiya123/b2b_leads_generator`)
+   — this folder has its own `.git`, so the standard flow works:
 
-Script mirrors the working tree into `/c/temp/lead_generator/B2B/`,
-excludes runtime output (data.db, raw/, logs/, batches/, node_modules/,
-.next/, schedules.json, etc.), commits, and pushes. Re-runnable; safe when
-nothing changed (prints "no changes to commit").
+   ```bash
+   git add <files>
+   git commit -m "msg"
+   git push origin main
+   ```
+
+2. **Org repo** (`github.com/BitCodingSolution/lead_generator`, `B2B/`
+   subfolder) — published via the sync script, which mirrors the
+   working tree into `/c/temp/lead_generator/B2B/` and pushes from
+   there. Excludes runtime output (data.db, raw/, logs/, batches/,
+   node_modules/, .next/, schedules.json, etc).
+
+   ```bash
+   bash scripts/sync_to_github.sh "your commit message"
+   ```
+
+   Re-runnable; safe when nothing changed (prints "no changes to
+   commit").
+
+When asked to "commit and push", do BOTH unless the user says
+otherwise.

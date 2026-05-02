@@ -3,6 +3,7 @@
 import useSWR, { mutate } from "swr"
 import { Trash2, RotateCcw, ExternalLink } from "lucide-react"
 import { api, swrFetcher } from "@/lib/api"
+import { fmtDateShort } from "@/lib/datetime"
 
 type BinRow = {
   id: number
@@ -79,7 +80,7 @@ export function LinkedInRecyclebinList() {
                 </span>
               </td>
               <td className="px-3 py-2 text-xs text-zinc-500 tnum">
-                {fmtDate(r.moved_at)}
+                {fmtDateShort(r.moved_at)}
               </td>
               <td className="px-3 py-2 text-right">
                 <div className="inline-flex items-center gap-1">
@@ -112,13 +113,3 @@ export function LinkedInRecyclebinList() {
   )
 }
 
-function fmtDate(iso: string): string {
-  try {
-    return new Date(iso).toLocaleDateString(undefined, {
-      month: "short",
-      day: "numeric",
-    })
-  } catch {
-    return iso
-  }
-}
