@@ -64,3 +64,5 @@ grab_leads/sources/*/raw/
 grab_leads/sources/*/data.db
 grab_leads/mailer/batches/
 grab_leads/.claude/
+
+Bridge/*

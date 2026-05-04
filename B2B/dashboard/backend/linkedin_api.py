@@ -352,7 +352,7 @@ def list_leads(
                 "FROM leads "
                 "WHERE posted_by IS NOT NULL AND TRIM(posted_by) != '' "
                 "  AND DATE(first_seen_at) >= ? "
-                "GROUP BY posted_by HAVING n_companies >= 3",
+                "GROUP BY posted_by HAVING COUNT(DISTINCT company) >= 3",
                 (cutoff_30d,),
             ).fetchall()
         }

@@ -1,262 +1,775 @@
 """
-LinkedIn source — SQLite schema + helpers.
-
-This DB is an isolated sibling of the Marcel and grab-source DBs. It is created
-on first access; schema lives here (not in a migration folder) because there
-is exactly one active version and fresh-start is a product decision.
+LinkedIn source — SQLAlchemy models + helpers (PostgreSQL).
 
 Public surface:
-    DB_PATH            — absolute path to leads.db
-    connect()          — context-managed connection with row_factory set
+    DATA_DIR           — filesystem path for ancillary files (CVs, fernet key)
+    connect()          — context-managed connection with dict-row access
+    get_engine()       — lazily-created SQLAlchemy engine
+    SessionLocal       — scoped session factory
+    Base               — declarative base (all models inherit from this)
     init()             — idempotent schema bootstrap
     ensure_safety_row()— seed the singleton safety_state row
 """
 from __future__ import annotations
 
 import datetime as dt
-import sqlite3
+import os
+import re
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator, Optional
+from typing import Any, Iterator, Optional, Sequence
 
-BASE = Path(r"H:/Lead Generator/B2B")
-DB_PATH = BASE / "Database" / "LinkedIn Data" / "leads.db"
+from sqlalchemy import (
+    CheckConstraint,
+    Column,
+    ForeignKey,
+    Index,
+    Integer,
+    Text,
+    UniqueConstraint,
+    create_engine,
+    text,
+)
+from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS leads (
-  id              INTEGER PRIMARY KEY AUTOINCREMENT,
-  post_url        TEXT UNIQUE NOT NULL,
-  posted_by       TEXT,
-  company         TEXT,
-  role            TEXT,
-  tech_stack      TEXT,
-  rate            TEXT,
-  location        TEXT,
-  tags            TEXT,
-  post_text       TEXT,
-  email           TEXT,
-  phone           TEXT,
-  status          TEXT NOT NULL DEFAULT 'New',
-  gen_subject     TEXT,
-  gen_body        TEXT,
-  email_mode      TEXT NOT NULL DEFAULT 'company',
-  cv_cluster      TEXT,
-  jaydip_note     TEXT,
-  skip_reason     TEXT,
-  skip_source     TEXT,
-  first_seen_at   TEXT NOT NULL,
-  last_seen_at    TEXT NOT NULL,
-  queued_at       TEXT,
-  sent_at         TEXT,
-  replied_at      TEXT,
-  bounced_at      TEXT,
-  follow_up_at    TEXT,
-  needs_attention INTEGER NOT NULL DEFAULT 0,
-  sent_message_id TEXT,
-  -- ISO timestamp the lead is snoozed until. While set + in the future
-  -- needs_attention is forced to 0 and the leads list dims the row.
-  -- When the timestamp passes, a lazy sweep on /leads clears it and
-  -- restores needs_attention=1 so the lead resurfaces.
-  remind_at       TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_leads_status    ON leads(status);
-CREATE INDEX IF NOT EXISTS idx_leads_attention ON leads(needs_attention);
-CREATE INDEX IF NOT EXISTS idx_leads_last_seen ON leads(last_seen_at);
-CREATE INDEX IF NOT EXISTS idx_leads_remind_at ON leads(remind_at);
+# ---------------------------------------------------------------------------
+# Filesystem root for ancillary files (CVs, fernet key, etc.)
+# Consumers import this instead of DB_PATH for file-based lookups.
+# ---------------------------------------------------------------------------
+BASE = Path(r"../B2B")
+DATA_DIR = BASE / "Database" / "LinkedIn Data"
 
-CREATE TABLE IF NOT EXISTS recyclebin (
-  id           INTEGER PRIMARY KEY AUTOINCREMENT,
-  original_id  INTEGER,
-  post_url     TEXT UNIQUE,
-  payload_json TEXT NOT NULL,
-  reason       TEXT NOT NULL,
-  moved_at     TEXT NOT NULL
-);
+# Backward-compat alias — some consumers import DB_PATH for its .parent
+# to locate the fernet key or CV storage directory.  Points at the same
+# directory as DATA_DIR; no longer references an actual .db file.
+DB_PATH = DATA_DIR / "leads.db"
 
--- Permanent dedup shadow. When the user "clears" the recyclebin we free the
--- heavy payload_json rows but keep post_url here so the ingest path still
--- recognises a previously-rejected post and refuses to re-surface it.
--- Separate from recyclebin so it survives clear/restore churn.
-CREATE TABLE IF NOT EXISTS archived_urls (
-  post_url    TEXT PRIMARY KEY,
-  reason      TEXT,
-  archived_at TEXT NOT NULL
-);
+# ---------------------------------------------------------------------------
+# SQLAlchemy setup
+# ---------------------------------------------------------------------------
+Base = declarative_base()
 
-CREATE TABLE IF NOT EXISTS safety_state (
-  id                   INTEGER PRIMARY KEY CHECK (id = 1),
-  daily_sent_count     INTEGER NOT NULL DEFAULT 0,
-  daily_sent_date      TEXT,
-  last_send_at         TEXT,
-  consecutive_failures INTEGER NOT NULL DEFAULT 0,
-  warning_paused_until TEXT,
-  autopilot_enabled    INTEGER NOT NULL DEFAULT 0,
-  autopilot_hour       INTEGER NOT NULL DEFAULT 10,
-  autopilot_minute     INTEGER NOT NULL DEFAULT 0,
-  -- NULL = send the full effective daily cap. An integer caps the
-  -- autopilot batch at exactly N leads so the user can drip slower
-  -- than the account's warmup allowance.
-  autopilot_count      INTEGER,
-  -- IANA timezone name the autopilot hour is evaluated in. Defaults to
-  -- local time (empty string) for backwards-compat; set to e.g.
-  -- 'Asia/Kolkata' to pin the daily trigger when the server TZ differs.
-  autopilot_tz         TEXT NOT NULL DEFAULT '',
-  -- When 1: sends refused on Sat/Sun and outside 9-18 local. Default 0
-  -- keeps the looser 7-23 quiet-hours window and allows weekends.
-  business_hours_only  INTEGER NOT NULL DEFAULT 0,
-  safety_mode          TEXT NOT NULL DEFAULT 'max'
-);
+_engine = None
 
-CREATE TABLE IF NOT EXISTS replies (
-  id              INTEGER PRIMARY KEY AUTOINCREMENT,
-  lead_id         INTEGER NOT NULL REFERENCES leads(id),
-  gmail_msg_id    TEXT UNIQUE NOT NULL,
-  gmail_thread_id TEXT,
-  from_email      TEXT,
-  subject         TEXT,
-  snippet         TEXT,
-  received_at     TEXT NOT NULL,
-  kind            TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_replies_lead ON replies(lead_id);
 
--- Multi-account Gmail rotation. Each row = one connected Gmail with its
--- own app password, daily cap, and IMAP cursor. Picker does round-robin
--- across active rows so total per-day throughput scales with account count.
-CREATE TABLE IF NOT EXISTS gmail_accounts (
-  id                INTEGER PRIMARY KEY AUTOINCREMENT,
-  email             TEXT NOT NULL UNIQUE,
-  app_password_enc  TEXT NOT NULL,
-  display_name      TEXT,
-  daily_cap         INTEGER NOT NULL DEFAULT 50,
-  sent_today        INTEGER NOT NULL DEFAULT 0,
-  sent_date         TEXT,                      -- YYYY-MM-DD; reset when day rolls over
-  last_sent_at      TEXT,
-  imap_uid_seen     INTEGER NOT NULL DEFAULT 0,
-  status            TEXT NOT NULL DEFAULT 'active',  -- active | paused
-  warmup_enabled    INTEGER NOT NULL DEFAULT 1,      -- ramp cap up over first 14 days
-  warmup_start_date TEXT,                            -- YYYY-MM-DD; NULL → use connected_at
-  connected_at      TEXT NOT NULL,
-  last_verified_at  TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_gmail_accounts_status ON gmail_accounts(status);
+def get_engine():
+    """Lazily create the SQLAlchemy engine.
 
-CREATE TABLE IF NOT EXISTS extension_keys (
-  key          TEXT PRIMARY KEY,
-  label        TEXT,
-  created_at   TEXT NOT NULL,
-  last_used_at TEXT
-);
+    Reads DATABASE_URL from the environment at call time (not import time)
+    so that dotenv / startup scripts can set it before the first connection.
+    """
+    global _engine
+    if _engine is None:
+        # Load .env if present — idempotent, won't override existing env.
+        try:
+            from dotenv import load_dotenv
+            load_dotenv()
+        except ImportError:
+            pass
 
-CREATE TABLE IF NOT EXISTS events (
-  id        INTEGER PRIMARY KEY AUTOINCREMENT,
-  at        TEXT NOT NULL,
-  kind      TEXT NOT NULL,
-  lead_id   INTEGER,
-  meta_json TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_events_at ON events(at);
+        db_url = os.environ.get(
+            "DATABASE_URL",
+            "postgresql://postgres:postgres@localhost:5432/linkedin_leads",
+        )
+        _engine = create_engine(
+            db_url,
+            pool_pre_ping=True,
+            pool_size=5,
+            max_overflow=10,
+        )
+    return _engine
 
--- Blocklist: suppress ingest + send for matching companies / domains.
--- Reason is free-text for audit ("upwork contract noise", "past bad fit").
-CREATE TABLE IF NOT EXISTS blocklist (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  kind       TEXT NOT NULL,              -- company | domain
-  value      TEXT NOT NULL,              -- lowercase normalized
-  reason     TEXT,
-  created_at TEXT NOT NULL,
-  UNIQUE(kind, value)
-);
 
--- CV library: uploaded PDFs auto-picked by cv_cluster at send time.
-CREATE TABLE IF NOT EXISTS cvs (
-  id          INTEGER PRIMARY KEY AUTOINCREMENT,
-  cluster     TEXT NOT NULL UNIQUE,       -- python | ml | ai_llm | fullstack | scraping | n8n | default
-  filename    TEXT NOT NULL,              -- original upload filename
-  stored_path TEXT NOT NULL,              -- absolute path to file on disk
-  size_bytes  INTEGER,
-  uploaded_at TEXT NOT NULL
-);
+SessionLocal = sessionmaker(bind=None)  # bind set in init()
 
--- Follow-ups: tracks which leads have been followed up and when.
--- First follow-up fires 3 days after last_sent if no reply, second 7 days after first.
-CREATE TABLE IF NOT EXISTS followups (
-  id            INTEGER PRIMARY KEY AUTOINCREMENT,
-  lead_id       INTEGER NOT NULL REFERENCES leads(id),
-  sequence      INTEGER NOT NULL,          -- 1 = first follow-up, 2 = second
-  message_id    TEXT,
-  sent_at       TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_followups_lead ON followups(lead_id);
 
--- Per-company enrichment cache. Populated lazily before drafting (or via
--- a manual button) so the drafter can reference real-world company
--- context — what they do, recent news, headcount hints — without paying
--- the fetch cost on every draft.
---   summary:   short text (~200-500 chars) extracted from homepage
---              meta description / first paragraph. Empty = "we tried
---              and got nothing" — caller respects the cooldown to
---              avoid hammering broken endpoints.
---   source:    where the data came from (homepage URL or 'manual').
-CREATE TABLE IF NOT EXISTS company_enrichment (
-  company    TEXT PRIMARY KEY,
-  summary    TEXT,
-  source     TEXT,
-  fetched_at TEXT NOT NULL
-);
+# ---------------------------------------------------------------------------
+# PgConnection adapter
+#
+# Wraps a SQLAlchemy Connection to expose an API compatible with the
+# sqlite3.Connection interface used by 76+ call sites across the codebase.
+#
+# Key translations:
+#   - ? placeholders  →  %s  (psycopg2 paramstyle)
+#   - INSERT OR REPLACE INTO <t> (...) VALUES (...)
+#         → INSERT INTO <t> (...) VALUES (...) ON CONFLICT (<pk>) DO UPDATE SET ...
+#   - INSERT OR IGNORE INTO <t> (...) VALUES (...)
+#         → INSERT INTO <t> (...) VALUES (...) ON CONFLICT DO NOTHING
+#   - row["col"] access via DictRow wrapper
+#   - .lastrowid via RETURNING id (auto-appended on INSERT)
+#   - .rowcount on CursorResult
+# ---------------------------------------------------------------------------
 
--- Autopilot state (tracked per-day for visibility).
-CREATE TABLE IF NOT EXISTS autopilot_runs (
-  id            INTEGER PRIMARY KEY AUTOINCREMENT,
-  fired_at      TEXT NOT NULL,
-  fired_date    TEXT NOT NULL UNIQUE,
-  total_queued  INTEGER,
-  status        TEXT NOT NULL              -- started | skipped_quiet | skipped_quota | skipped_paused | skipped_no_drafts
-);
+# Map table name → conflict target columns for INSERT OR REPLACE rewriting.
+# Only tables that actually use INSERT OR REPLACE/IGNORE need entries here.
+_CONFLICT_KEYS: dict[str, list[str]] = {
+    "recyclebin": ["post_url"],
+    "archived_urls": ["post_url"],
+    "autopilot_runs": ["fired_date"],
+    "replies": ["gmail_msg_id"],
+    "kv_settings": ["key"],
+    "company_enrichment": ["company"],
+    "blocklist": ["kind", "value"],
+}
 
--- Generic key/value runtime settings. Used for flags that previously
--- required restart-and-set-env (digest enabled, drafter feature switches).
--- Kept narrow on purpose: structured config (gmail accounts, warmup curve)
--- still lives on its purpose-built table, and bridge URL stays in env
--- because it's read at uvicorn import time before this DB is open.
---
--- Values are stored as text — callers parse to bool/int as needed.
-CREATE TABLE IF NOT EXISTS kv_settings (
-  key        TEXT PRIMARY KEY,
-  value      TEXT NOT NULL,
-  updated_at TEXT NOT NULL
-);
-"""
+# INSERT OR REPLACE pattern
+_RE_INSERT_OR_REPLACE = re.compile(
+    r"INSERT\s+OR\s+REPLACE\s+INTO\s+(\w+)\s*\(([^)]+)\)\s*VALUES\s*\(([^)]+)\)",
+    re.IGNORECASE,
+)
+# INSERT OR IGNORE pattern
+_RE_INSERT_OR_IGNORE = re.compile(
+    r"INSERT\s+OR\s+IGNORE\s+INTO\s+(\w+)",
+    re.IGNORECASE,
+)
 
+
+class DictRow:
+    """Mimics sqlite3.Row: supports row["col"], row[0], dict(row), keys()."""
+
+    __slots__ = ("_data", "_keys")
+
+    def __init__(self, mapping):
+        self._keys = list(mapping.keys())
+        self._data = dict(mapping)
+
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            return self._data[self._keys[key]]
+        return self._data[key]
+
+    def __contains__(self, key):
+        return key in self._data
+
+    def keys(self):
+        return self._keys
+
+    def items(self):
+        return self._data.items()
+
+    def values(self):
+        return self._data.values()
+
+    def get(self, key, default=None):
+        return self._data.get(key, default)
+
+    def __iter__(self):
+        return iter(self._data.values())
+
+    def __repr__(self):
+        return f"DictRow({self._data})"
+
+
+class CursorResult:
+    """Thin wrapper around SQLAlchemy CursorResult that exposes .lastrowid,
+    .rowcount, .fetchone(), .fetchall() with DictRow results."""
+
+    __slots__ = ("_result", "lastrowid", "rowcount")
+
+    def __init__(self, result, lastrowid=None):
+        self._result = result
+        self.rowcount = result.rowcount if result.rowcount >= 0 else 0
+        self.lastrowid = lastrowid
+
+    def fetchone(self):
+        row = self._result.fetchone()
+        if row is None:
+            return None
+        return DictRow(row._mapping)
+
+    def fetchall(self):
+        rows = self._result.fetchall()
+        return [DictRow(r._mapping) for r in rows]
+
+
+def _rewrite_sql(sql: str) -> str:
+    """Convert SQLite-isms to PostgreSQL-compatible SQL."""
+    # 1) INSERT OR REPLACE → INSERT ... ON CONFLICT (...) DO UPDATE SET ...
+    m = _RE_INSERT_OR_REPLACE.search(sql)
+    if m:
+        table = m.group(1)
+        cols_str = m.group(2)
+        vals_str = m.group(3)
+        cols = [c.strip() for c in cols_str.split(",")]
+        conflict_cols = _CONFLICT_KEYS.get(table, [])
+        if conflict_cols:
+            update_cols = [c for c in cols if c not in conflict_cols]
+            set_clause = ", ".join(
+                f"{c} = excluded.{c}" for c in update_cols
+            )
+            sql = (
+                f"INSERT INTO {table} ({cols_str}) VALUES ({vals_str}) "
+                f"ON CONFLICT ({', '.join(conflict_cols)}) "
+                f"DO UPDATE SET {set_clause}"
+            )
+        else:
+            # No known conflict key — just do a plain insert
+            sql = sql.replace("INSERT OR REPLACE INTO", "INSERT INTO", 1)
+
+    # 2) INSERT OR IGNORE → INSERT ... ON CONFLICT DO NOTHING
+    m2 = _RE_INSERT_OR_IGNORE.search(sql)
+    if m2:
+        table = m2.group(1)
+        conflict_cols = _CONFLICT_KEYS.get(table)
+        if conflict_cols:
+            sql = re.sub(
+                r"INSERT\s+OR\s+IGNORE\s+INTO",
+                "INSERT INTO",
+                sql,
+                count=1,
+                flags=re.IGNORECASE,
+            )
+            # Find the VALUES (...) and append ON CONFLICT
+            # Check if there's already an ON CONFLICT
+            if "ON CONFLICT" not in sql.upper():
+                sql += f" ON CONFLICT ({', '.join(conflict_cols)}) DO NOTHING"
+        else:
+            sql = re.sub(
+                r"INSERT\s+OR\s+IGNORE\s+INTO",
+                "INSERT INTO",
+                sql,
+                count=1,
+                flags=re.IGNORECASE,
+            )
+            if "ON CONFLICT" not in sql.upper():
+                sql += " ON CONFLICT DO NOTHING"
+
+    # 3) DATE('now', '-N day/days') → CURRENT_DATE - INTERVAL 'N days'
+    sql = re.sub(
+        r"DATE\('now',\s*'-(\d+)\s*days?'\)",
+        r"(CURRENT_DATE - INTERVAL '\1 days')",
+        sql,
+        flags=re.IGNORECASE,
+    )
+    # DATE('now') → CURRENT_DATE
+    sql = re.sub(r"DATE\('now'\)", "CURRENT_DATE", sql, flags=re.IGNORECASE)
+
+    # 4) ? → %s placeholders
+    sql = sql.replace("?", "%s")
+
+    return sql
+
+
+class PgConnection:
+    """Drop-in replacement for sqlite3.Connection. Wraps a SQLAlchemy
+    Connection and translates SQLite-style calls to PostgreSQL."""
+
+    def __init__(self, sa_conn):
+        self._conn = sa_conn
+
+    def execute(self, sql: str, params: Sequence = ()) -> CursorResult:
+        rewritten = _rewrite_sql(sql)
+
+        # Auto-append RETURNING id on INSERT to capture lastrowid
+        lastrowid = None
+        is_insert = rewritten.lstrip().upper().startswith("INSERT")
+
+        if is_insert and "RETURNING" not in rewritten.upper():
+            rewritten_with_returning = rewritten + " RETURNING id"
+        else:
+            rewritten_with_returning = None
+
+        try:
+            if rewritten_with_returning and is_insert:
+                result = self._conn.execute(
+                    text(rewritten_with_returning), _params_to_dict(rewritten_with_returning, params)
+                )
+                row = result.fetchone()
+                if row:
+                    lastrowid = row[0]
+                    # Reconstruct result for the caller
+                    result = self._conn.execute(
+                        text("SELECT 1 WHERE false")
+                    )
+                return CursorResult(result, lastrowid=lastrowid)
+            else:
+                result = self._conn.execute(
+                    text(rewritten), _params_to_dict(rewritten, params)
+                )
+                return CursorResult(result)
+        except Exception:
+            # If RETURNING fails (e.g. table has no 'id' column), retry without
+            if rewritten_with_returning and is_insert:
+                result = self._conn.execute(
+                    text(rewritten), _params_to_dict(rewritten, params)
+                )
+                return CursorResult(result)
+            raise
+
+    def executemany(self, sql: str, params_list: Sequence[Sequence]) -> None:
+        rewritten = _rewrite_sql(sql)
+        for params in params_list:
+            self._conn.execute(
+                text(rewritten), _params_to_dict(rewritten, params)
+            )
+
+    def commit(self) -> None:
+        self._conn.commit()
+
+    def rollback(self) -> None:
+        self._conn.rollback()
+
+    def close(self) -> None:
+        self._conn.close()
+
+
+def _params_to_dict(sql: str, params: Sequence) -> dict:
+    """Convert positional %s params to named :p0, :p1, ... params.
+    SQLAlchemy text() requires named params."""
+    if not params:
+        return {}
+    # Replace %s with :p0, :p1, ... and build the dict
+    result_sql_parts = []
+    idx = 0
+    mapping = {}
+    i = 0
+    while i < len(sql):
+        if sql[i] == '%' and i + 1 < len(sql) and sql[i + 1] == 's':
+            key = f"p{idx}"
+            mapping[key] = params[idx] if idx < len(params) else None
+            idx += 1
+            i += 2
+        else:
+            i += 1
+    return mapping
+
+
+def _rewrite_sql_named(sql: str, params: Sequence) -> tuple[str, dict]:
+    """Rewrite %s placeholders to :p0, :p1, ... and return (sql, params_dict)."""
+    mapping = {}
+    idx = 0
+    new_sql = []
+    i = 0
+    while i < len(sql):
+        if sql[i] == '%' and i + 1 < len(sql) and sql[i + 1] == 's':
+            key = f"p{idx}"
+            mapping[key] = params[idx] if idx < len(params) else None
+            new_sql.append(f":{key}")
+            idx += 1
+            i += 2
+        else:
+            new_sql.append(sql[i])
+            i += 1
+    return "".join(new_sql), mapping
+
+
+# Tables whose primary key is named 'id' — only these get RETURNING id.
+_TABLES_WITH_ID_PK = {
+    "leads", "recyclebin", "safety_state", "replies", "gmail_accounts",
+    "extension_keys", "events", "blocklist", "cvs", "followups",
+    "autopilot_runs", "email_opens",
+}
+
+# Regex to extract table name from INSERT INTO <table>
+_RE_INSERT_TABLE = re.compile(
+    r"INSERT\s+INTO\s+(\w+)", re.IGNORECASE
+)
+
+
+class PgConnectionFixed(PgConnection):
+    """Improved PgConnection that properly handles named parameters."""
+
+    def execute(self, sql: str, params: Sequence = ()) -> CursorResult:
+        rewritten = _rewrite_sql(sql)
+
+        # Convert %s → :p0, :p1, ... for SQLAlchemy text()
+        named_sql, param_dict = _rewrite_sql_named(rewritten, params)
+
+        # Auto-append RETURNING id on INSERT to capture lastrowid,
+        # but only for tables that actually have an 'id' column.
+        lastrowid = None
+        is_insert = named_sql.lstrip().upper().startswith("INSERT")
+
+        should_return_id = False
+        if is_insert and "RETURNING" not in named_sql.upper():
+            m = _RE_INSERT_TABLE.search(named_sql)
+            if m and m.group(1).lower() in _TABLES_WITH_ID_PK:
+                should_return_id = True
+
+        if should_return_id:
+            result = self._conn.execute(
+                text(named_sql + " RETURNING id"), param_dict
+            )
+            row = result.fetchone()
+            if row:
+                lastrowid = row[0]
+            # Return a "spent" result — the INSERT already consumed its rows
+            class _SpentResult:
+                def __init__(self, rr):
+                    self.rowcount = 1 if lastrowid else (rr.rowcount if rr.rowcount >= 0 else 0)
+                def fetchone(self): return None
+                def fetchall(self): return []
+            return CursorResult(_SpentResult(result), lastrowid=lastrowid)
+        else:
+            result = self._conn.execute(text(named_sql), param_dict)
+            return CursorResult(result)
+
+    def executemany(self, sql: str, params_list: Sequence[Sequence]) -> None:
+        rewritten = _rewrite_sql(sql)
+        for params in params_list:
+            named_sql, param_dict = _rewrite_sql_named(rewritten, params)
+            self._conn.execute(text(named_sql), param_dict)
+
+
+# ---------------------------------------------------------------------------
+# Models
+# ---------------------------------------------------------------------------
+
+class Lead(Base):
+    __tablename__ = "leads"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    post_url = Column(Text, unique=True, nullable=False)
+    posted_by = Column(Text)
+    company = Column(Text)
+    role = Column(Text)
+    tech_stack = Column(Text)
+    rate = Column(Text)
+    location = Column(Text)
+    tags = Column(Text)
+    post_text = Column(Text)
+    email = Column(Text)
+    phone = Column(Text)
+    status = Column(Text, nullable=False, server_default="New")
+    gen_subject = Column(Text)
+    gen_body = Column(Text)
+    email_mode = Column(Text, nullable=False, server_default="company")
+    cv_cluster = Column(Text)
+    jaydip_note = Column(Text)
+    skip_reason = Column(Text)
+    skip_source = Column(Text)
+    first_seen_at = Column(Text, nullable=False)
+    last_seen_at = Column(Text, nullable=False)
+    queued_at = Column(Text)
+    sent_at = Column(Text)
+    replied_at = Column(Text)
+    bounced_at = Column(Text)
+    follow_up_at = Column(Text)
+    needs_attention = Column(Integer, nullable=False, server_default="0")
+    sent_message_id = Column(Text)
+    # ISO timestamp the lead is snoozed until. While set + in the future
+    # needs_attention is forced to 0 and the leads list dims the row.
+    remind_at = Column(Text)
+
+    # --- columns added via migration (now part of canonical schema) ---
+    sent_via_account_id = Column(Integer)
+    call_status = Column(Text)
+    reviewed_at = Column(Text)
+    open_token = Column(Text)
+    open_count = Column(Integer, nullable=False, server_default="0")
+    first_opened_at = Column(Text)
+    last_opened_at = Column(Text)
+    scheduled_send_at = Column(Text)
+    ooo_nudge_at = Column(Text)
+    ooo_nudge_sent_at = Column(Text)
+    fit_score = Column(Integer)
+    fit_score_reasons = Column(Text)
+
+    # relationships
+    replies = relationship("Reply", back_populates="lead")
+    followups = relationship("Followup", back_populates="lead")
+    email_opens = relationship("EmailOpen", back_populates="lead")
+
+    __table_args__ = (
+        Index("idx_leads_status", "status"),
+        Index("idx_leads_attention", "needs_attention"),
+        Index("idx_leads_last_seen", "last_seen_at"),
+        Index("idx_leads_remind_at", "remind_at"),
+        Index(
+            "idx_leads_scheduled",
+            "scheduled_send_at",
+            postgresql_where=text("scheduled_send_at IS NOT NULL"),
+        ),
+        Index("idx_leads_msgid", "sent_message_id"),
+        Index("idx_leads_open_token", "open_token"),
+    )
+
+
+class RecycleBin(Base):
+    __tablename__ = "recyclebin"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    original_id = Column(Integer)
+    post_url = Column(Text, unique=True)
+    payload_json = Column(Text, nullable=False)
+    reason = Column(Text, nullable=False)
+    moved_at = Column(Text, nullable=False)
+
+
+class ArchivedUrl(Base):
+    """Permanent dedup shadow."""
+
+    __tablename__ = "archived_urls"
+
+    post_url = Column(Text, primary_key=True)
+    reason = Column(Text)
+    archived_at = Column(Text, nullable=False)
+
+
+class SafetyState(Base):
+    __tablename__ = "safety_state"
+
+    id = Column(Integer, primary_key=True)
+    daily_sent_count = Column(Integer, nullable=False, server_default="0")
+    daily_sent_date = Column(Text)
+    last_send_at = Column(Text)
+    consecutive_failures = Column(Integer, nullable=False, server_default="0")
+    warning_paused_until = Column(Text)
+    autopilot_enabled = Column(Integer, nullable=False, server_default="0")
+    autopilot_hour = Column(Integer, nullable=False, server_default="10")
+    autopilot_minute = Column(Integer, nullable=False, server_default="0")
+    autopilot_count = Column(Integer)
+    autopilot_tz = Column(Text, nullable=False, server_default="")
+    business_hours_only = Column(Integer, nullable=False, server_default="0")
+    safety_mode = Column(Text, nullable=False, server_default="max")
+    warmup_curve_json = Column(Text)
+    followups_autopilot = Column(Integer, nullable=False, server_default="0")
+    followups_hour = Column(Integer, nullable=False, server_default="11")
+
+    __table_args__ = (
+        CheckConstraint("id = 1", name="singleton_safety_state"),
+    )
+
+
+class Reply(Base):
+    __tablename__ = "replies"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    lead_id = Column(Integer, ForeignKey("leads.id"), nullable=False)
+    gmail_msg_id = Column(Text, unique=True, nullable=False)
+    gmail_thread_id = Column(Text)
+    from_email = Column(Text)
+    subject = Column(Text)
+    snippet = Column(Text)
+    received_at = Column(Text, nullable=False)
+    kind = Column(Text, nullable=False)
+    handled_at = Column(Text)
+    sentiment = Column(Text)
+    body = Column(Text)
+    auto_draft_body = Column(Text)
+    auto_draft_at = Column(Text)
+    intent = Column(Text)
+
+    lead = relationship("Lead", back_populates="replies")
+
+    __table_args__ = (
+        Index("idx_replies_lead", "lead_id"),
+    )
+
+
+class GmailAccount(Base):
+    """Multi-account Gmail rotation."""
+
+    __tablename__ = "gmail_accounts"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    email = Column(Text, nullable=False, unique=True)
+    app_password_enc = Column(Text, nullable=False)
+    display_name = Column(Text)
+    daily_cap = Column(Integer, nullable=False, server_default="50")
+    sent_today = Column(Integer, nullable=False, server_default="0")
+    sent_date = Column(Text)
+    last_sent_at = Column(Text)
+    imap_uid_seen = Column(Integer, nullable=False, server_default="0")
+    status = Column(Text, nullable=False, server_default="active")
+    warmup_enabled = Column(Integer, nullable=False, server_default="1")
+    warmup_start_date = Column(Text)
+    connected_at = Column(Text, nullable=False)
+    last_verified_at = Column(Text)
+    consecutive_failures = Column(Integer, nullable=False, server_default="0")
+    bounce_count_today = Column(Integer, nullable=False, server_default="0")
+    paused_reason = Column(Text)
+
+    __table_args__ = (
+        Index("idx_gmail_accounts_status", "status"),
+    )
+
+
+class ExtensionKey(Base):
+    __tablename__ = "extension_keys"
+
+    key = Column(Text, primary_key=True)
+    label = Column(Text)
+    created_at = Column(Text, nullable=False)
+    last_used_at = Column(Text)
+
+
+class Event(Base):
+    __tablename__ = "events"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    at = Column(Text, nullable=False)
+    kind = Column(Text, nullable=False)
+    lead_id = Column(Integer)
+    meta_json = Column(Text)
+
+    __table_args__ = (
+        Index("idx_events_at", "at"),
+    )
+
+
+class BlocklistEntry(Base):
+    """Blocklist: suppress ingest + send for matching companies / domains."""
+
+    __tablename__ = "blocklist"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    kind = Column(Text, nullable=False)
+    value = Column(Text, nullable=False)
+    reason = Column(Text)
+    created_at = Column(Text, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("kind", "value", name="uq_blocklist_kind_value"),
+    )
+
+
+class CV(Base):
+    """CV library: uploaded PDFs auto-picked by cv_cluster at send time."""
+
+    __tablename__ = "cvs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    cluster = Column(Text, nullable=False, unique=True)
+    filename = Column(Text, nullable=False)
+    stored_path = Column(Text, nullable=False)
+    size_bytes = Column(Integer)
+    uploaded_at = Column(Text, nullable=False)
+
+
+class Followup(Base):
+    """Follow-ups: tracks which leads have been followed up and when."""
+
+    __tablename__ = "followups"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    lead_id = Column(Integer, ForeignKey("leads.id"), nullable=False)
+    sequence = Column(Integer, nullable=False)
+    message_id = Column(Text)
+    sent_at = Column(Text, nullable=False)
+
+    lead = relationship("Lead", back_populates="followups")
+
+    __table_args__ = (
+        Index("idx_followups_lead", "lead_id"),
+    )
+
+
+class CompanyEnrichment(Base):
+    """Per-company enrichment cache."""
+
+    __tablename__ = "company_enrichment"
+
+    company = Column(Text, primary_key=True)
+    summary = Column(Text)
+    source = Column(Text)
+    fetched_at = Column(Text, nullable=False)
+
+
+class AutopilotRun(Base):
+    """Autopilot state (tracked per-day for visibility)."""
+
+    __tablename__ = "autopilot_runs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    fired_at = Column(Text, nullable=False)
+    fired_date = Column(Text, nullable=False, unique=True)
+    total_queued = Column(Integer)
+    status = Column(Text, nullable=False)
+
+
+class KVSetting(Base):
+    """Generic key/value runtime settings."""
+
+    __tablename__ = "kv_settings"
+
+    key = Column(Text, primary_key=True)
+    value = Column(Text, nullable=False)
+    updated_at = Column(Text, nullable=False)
+
+
+class EmailOpen(Base):
+    """Individual open events (one row per open — pixel fetch)."""
+
+    __tablename__ = "email_opens"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    lead_id = Column(Integer, ForeignKey("leads.id"), nullable=False)
+    opened_at = Column(Text, nullable=False)
+    user_agent = Column(Text)
+    ip = Column(Text)
+
+    lead = relationship("Lead", back_populates="email_opens")
+
+    __table_args__ = (
+        Index("idx_email_opens_lead", "lead_id"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Public connection helper — drop-in for the old sqlite3-based connect()
+# ---------------------------------------------------------------------------
 
 @contextmanager
-def connect() -> Iterator[sqlite3.Connection]:
-    """Yield a connection with row_factory=Row. Caller commits explicitly."""
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(str(DB_PATH))
-    con.row_factory = sqlite3.Row
-    con.execute("PRAGMA foreign_keys = ON")
+def connect() -> Iterator[PgConnectionFixed]:
+    """Yield a PgConnection wrapping a SQLAlchemy connection.
+
+    Usage is identical to the old sqlite3 pattern::
+
+        with connect() as con:
+            row = con.execute("SELECT * FROM leads WHERE id = ?", (42,)).fetchone()
+            print(row["company"])
+            con.commit()
+    """
+    engine = get_engine()
+    raw = engine.connect()
+    con = PgConnectionFixed(raw)
     try:
         yield con
+    except Exception:
+        raw.rollback()
+        raise
     finally:
-        con.close()
+        raw.close()
 
 
 def init() -> None:
-    """Create tables + seed the singleton safety row. Idempotent."""
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    """Run Alembic migrations to head + seed the singleton safety row.
+
+    Replaces the old ``Base.metadata.create_all()`` approach so that
+    all schema changes are tracked by Alembic migration scripts.
+    Idempotent — safe to call on every app boot.
+    """
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    eng = get_engine()
+    SessionLocal.configure(bind=eng)
+
+    # Run Alembic migrations programmatically
+    from alembic.config import Config as AlembicConfig
+    from alembic import command as alembic_command
+
+    alembic_cfg = AlembicConfig(
+        str(Path(__file__).resolve().parent / "alembic.ini")
+    )
+    # Override the script_location to be absolute so it works regardless
+    # of the cwd when the app is launched.
+    alembic_cfg.set_main_option(
+        "script_location",
+        str(Path(__file__).resolve().parent / "migrations"),
+    )
+    # Pass the engine's URL so Alembic doesn't need to re-read .env
+    alembic_cfg.set_main_option(
+        "sqlalchemy.url",
+        str(eng.url),
+    )
+    alembic_command.upgrade(alembic_cfg, "head")
+
     with connect() as con:
-        con.executescript(SCHEMA)
-        _migrate(con)
         ensure_safety_row(con)
         con.commit()
 
 
 # --- kv_settings helpers ---------------------------------------------------
-# Generic runtime config. Read with `get_setting(key, env_key, default)` —
-# the priority is DB > env > default. That ordering means an env var still
-# works (handy for one-off overrides at boot) but the UI-set value wins
-# for normal day-to-day toggling.
 
 
 def _now_iso() -> str:
@@ -273,8 +786,7 @@ def get_setting_raw(key: str) -> Optional[str]:
 
 
 def set_setting_raw(key: str, value: str) -> None:
-    """Upsert a raw string value. Caller is responsible for serialisation
-    (use 'true'/'false' for bools, str(int) for ints)."""
+    """Upsert a raw string value."""
     with connect() as con:
         con.execute(
             "INSERT INTO kv_settings (key, value, updated_at) "
@@ -288,12 +800,10 @@ def set_setting_raw(key: str, value: str) -> None:
 
 def get_setting_bool(key: str, env_key: Optional[str] = None,
                      default: bool = False) -> bool:
-    """Bool setting with env fallback. Truthy values: '1', 'true', 'yes',
-    'on' (case-insensitive). Anything else is False."""
+    """Bool setting with env fallback."""
     raw = get_setting_raw(key)
     if raw is None and env_key:
-        import os as _os
-        raw = _os.environ.get(env_key)
+        raw = os.environ.get(env_key)
     if raw is None:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
@@ -303,8 +813,7 @@ def get_setting_int(key: str, env_key: Optional[str] = None,
                     default: int = 0) -> int:
     raw = get_setting_raw(key)
     if raw is None and env_key:
-        import os as _os
-        raw = _os.environ.get(env_key)
+        raw = os.environ.get(env_key)
     if raw is None:
         return default
     try:
@@ -313,204 +822,15 @@ def get_setting_int(key: str, env_key: Optional[str] = None,
         return default
 
 
-def _migrate(con) -> None:
-    """Add columns introduced after initial schema. Idempotent."""
-    cols = {r[1] for r in con.execute("PRAGMA table_info(leads)").fetchall()}
-    if "sent_message_id" not in cols:
-        con.execute("ALTER TABLE leads ADD COLUMN sent_message_id TEXT")
-    if "sent_via_account_id" not in cols:
-        con.execute("ALTER TABLE leads ADD COLUMN sent_via_account_id INTEGER")
-    if "call_status" not in cols:
-        con.execute("ALTER TABLE leads ADD COLUMN call_status TEXT")
-    if "reviewed_at" not in cols:
-        con.execute("ALTER TABLE leads ADD COLUMN reviewed_at TEXT")
-    if "open_token" not in cols:
-        con.execute("ALTER TABLE leads ADD COLUMN open_token TEXT")
-    if "open_count" not in cols:
-        con.execute(
-            "ALTER TABLE leads ADD COLUMN open_count INTEGER NOT NULL DEFAULT 0"
-        )
-    if "first_opened_at" not in cols:
-        con.execute("ALTER TABLE leads ADD COLUMN first_opened_at TEXT")
-    if "last_opened_at" not in cols:
-        con.execute("ALTER TABLE leads ADD COLUMN last_opened_at TEXT")
-    if "scheduled_send_at" not in cols:
-        # ISO-8601 timestamp. When set on a Drafted lead, a background
-        # scheduler picks it up at/after this time and sends via the
-        # standard send_one path (safety, warmup, blocklist all apply).
-        con.execute("ALTER TABLE leads ADD COLUMN scheduled_send_at TEXT")
-    if "ooo_nudge_at" not in cols:
-        # When an inbound OOO is detected, scheduler auto-stamps this to
-        # ~7 days from today (9am local). Separate from scheduled_send_at
-        # because the nudge is a THREAD reply, not a fresh send.
-        con.execute("ALTER TABLE leads ADD COLUMN ooo_nudge_at TEXT")
-    if "ooo_nudge_sent_at" not in cols:
-        # Stamp when the nudge actually goes out - prevents double-nudge.
-        con.execute("ALTER TABLE leads ADD COLUMN ooo_nudge_sent_at TEXT")
-    if "fit_score" not in cols:
-        # 0-100 heuristic priority score. Computed at ingest and any time
-        # key fields change (email set, draft generated, etc.).
-        con.execute("ALTER TABLE leads ADD COLUMN fit_score INTEGER")
-    if "fit_score_reasons" not in cols:
-        # JSON array of short reason strings - UI can surface why a lead
-        # scored what it scored.
-        con.execute("ALTER TABLE leads ADD COLUMN fit_score_reasons TEXT")
-    con.execute(
-        "CREATE INDEX IF NOT EXISTS idx_leads_scheduled "
-        "ON leads(scheduled_send_at) WHERE scheduled_send_at IS NOT NULL"
-    )
-    con.execute(
-        "CREATE INDEX IF NOT EXISTS idx_leads_msgid ON leads(sent_message_id)"
-    )
-    con.execute(
-        "CREATE INDEX IF NOT EXISTS idx_leads_open_token ON leads(open_token)"
-    )
-    # Individual open events (one row per open — pixel fetch). Useful for
-    # spotting repeat engagement vs. a single Gmail proxy prefetch.
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS email_opens (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            lead_id     INTEGER NOT NULL REFERENCES leads(id),
-            opened_at   TEXT NOT NULL,
-            user_agent  TEXT,
-            ip          TEXT
-        )
-    """)
-    con.execute(
-        "CREATE INDEX IF NOT EXISTS idx_email_opens_lead ON email_opens(lead_id)"
-    )
-    rep_cols = {r[1] for r in con.execute("PRAGMA table_info(replies)").fetchall()}
-    if rep_cols:
-        # Existing replies table (LinkedIn/campaigns flow). Extend with
-        # handled_at + sentiment so we can triage from the dashboard.
-        if "handled_at" not in rep_cols:
-            con.execute("ALTER TABLE replies ADD COLUMN handled_at TEXT")
-        if "sentiment" not in rep_cols:
-            con.execute("ALTER TABLE replies ADD COLUMN sentiment TEXT")
-        if "body" not in rep_cols:
-            # Full body — snippet is only first 500 chars, not enough for
-            # drafting a response.
-            con.execute("ALTER TABLE replies ADD COLUMN body TEXT")
-        if "auto_draft_body" not in rep_cols:
-            # Background-generated suggested reply (via Bridge) populated
-            # right after IMAP poll. UI pre-fills the textarea with this.
-            con.execute("ALTER TABLE replies ADD COLUMN auto_draft_body TEXT")
-        if "auto_draft_at" not in rep_cols:
-            con.execute("ALTER TABLE replies ADD COLUMN auto_draft_at TEXT")
-
-    acct_cols = {
-        r[1] for r in con.execute("PRAGMA table_info(gmail_accounts)").fetchall()
-    }
-    if acct_cols and "warmup_enabled" not in acct_cols:
-        con.execute(
-            "ALTER TABLE gmail_accounts ADD COLUMN warmup_enabled INTEGER "
-            "NOT NULL DEFAULT 1"
-        )
-    if acct_cols and "warmup_start_date" not in acct_cols:
-        con.execute(
-            "ALTER TABLE gmail_accounts ADD COLUMN warmup_start_date TEXT"
-        )
-    if acct_cols and "consecutive_failures" not in acct_cols:
-        con.execute(
-            "ALTER TABLE gmail_accounts ADD COLUMN consecutive_failures "
-            "INTEGER NOT NULL DEFAULT 0"
-        )
-    if acct_cols and "bounce_count_today" not in acct_cols:
-        con.execute(
-            "ALTER TABLE gmail_accounts ADD COLUMN bounce_count_today "
-            "INTEGER NOT NULL DEFAULT 0"
-        )
-    if acct_cols and "paused_reason" not in acct_cols:
-        con.execute(
-            "ALTER TABLE gmail_accounts ADD COLUMN paused_reason TEXT"
-        )
-
-    # Global warmup curve — stored as JSON on safety_state so users can
-    # tune the ramp to match their deliverability tolerance without a
-    # schema change.
-    safety_cols = {
-        r[1] for r in con.execute("PRAGMA table_info(safety_state)").fetchall()
-    }
-    if "warmup_curve_json" not in safety_cols:
-        con.execute(
-            "ALTER TABLE safety_state ADD COLUMN warmup_curve_json TEXT"
-        )
-    # Auto follow-up sequences: when 1, the daily _followups_tick fires
-    # run_followups() at the configured hour. Stays 0 by default so
-    # upgrading users opt in deliberately rather than getting surprise
-    # outbound mail.
-    if "followups_autopilot" not in safety_cols:
-        con.execute(
-            "ALTER TABLE safety_state ADD COLUMN "
-            "followups_autopilot INTEGER NOT NULL DEFAULT 0"
-        )
-    if "followups_hour" not in safety_cols:
-        con.execute(
-            "ALTER TABLE safety_state ADD COLUMN "
-            "followups_hour INTEGER NOT NULL DEFAULT 11"
-        )
-
-    # Intent column on replies — finer-grained than sentiment, drives
-    # which reply template the drawer surfaces. Computed once on inbound,
-    # stored so the UI can sort/filter without re-running the regex.
-    reply_cols = {
-        r[1] for r in con.execute("PRAGMA table_info(replies)").fetchall()
-    }
-    if "intent" not in reply_cols:
-        con.execute("ALTER TABLE replies ADD COLUMN intent TEXT")
-
-    # One-shot migration: if a pre-multi-account gmail_auth singleton exists
-    # (old installs) and gmail_accounts is empty, seed the first account from
-    # it so nothing breaks on upgrade. Fresh installs skip this entirely —
-    # the table may not exist.
-    legacy_exists = con.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='gmail_auth'"
-    ).fetchone()
-    if legacy_exists:
-        has_legacy = con.execute(
-            "SELECT email, app_password_enc, connected_at, last_verified_at, "
-            "       imap_uid_seen FROM gmail_auth WHERE id = 1"
-        ).fetchone()
-        new_count = con.execute(
-            "SELECT COUNT(*) FROM gmail_accounts"
-        ).fetchone()[0]
-        if has_legacy and has_legacy["email"] and has_legacy["app_password_enc"] and new_count == 0:
-            # Legacy accounts are already warm — don't retroactively throttle them.
-            con.execute(
-                "INSERT INTO gmail_accounts (email, app_password_enc, "
-                "connected_at, last_verified_at, imap_uid_seen, status, "
-                "warmup_enabled) VALUES (?, ?, ?, ?, ?, 'active', 0)",
-                (
-                    has_legacy["email"],
-                    has_legacy["app_password_enc"],
-                    has_legacy["connected_at"] or dt.datetime.now().isoformat(timespec="seconds"),
-                    has_legacy["last_verified_at"],
-                    int(has_legacy["imap_uid_seen"] or 0),
-                ),
-            )
-        # Table served its purpose — drop it so future audits don't flag it.
-        con.execute("DROP TABLE IF EXISTS gmail_auth")
-
-    # Any pre-existing account row that already has historical sends should
-    # also be treated as warm — otherwise turning on warmup late would hard-
-    # cap an account that's been sending 20+/day safely for weeks.
-    con.execute(
-        "UPDATE gmail_accounts SET warmup_enabled = 0 "
-        "WHERE warmup_enabled = 1 AND EXISTS ("
-        "  SELECT 1 FROM leads WHERE sent_via_account_id = gmail_accounts.id "
-        ")"
-    )
-
-
-def ensure_safety_row(con: sqlite3.Connection) -> None:
+def ensure_safety_row(con) -> None:
     row = con.execute("SELECT 1 FROM safety_state WHERE id = 1").fetchone()
     if row is None:
         con.execute(
-            "INSERT INTO safety_state (id, daily_sent_date) VALUES (1, ?)",
-            (dt.date.today().isoformat(),),
+            "INSERT INTO safety_state (id, daily_sent_date) VALUES (?, ?)",
+            (1, dt.date.today().isoformat()),
         )
 
 
 if __name__ == "__main__":
     init()
-    print(f"[ok] initialised {DB_PATH}")
+    print(f"[ok] initialised PostgreSQL database")

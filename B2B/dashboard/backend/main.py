@@ -25,7 +25,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-BASE = Path(r"H:/Lead Generator/B2B")
+BASE = Path(r"../B2B")
 DB = str(BASE / "Database" / "Marcel Data" / "leads.db")
 SCRIPTS = BASE / "scripts"
 BATCHES_DIR = BASE / "Database" / "Marcel Data" / "01_Daily_Batches"

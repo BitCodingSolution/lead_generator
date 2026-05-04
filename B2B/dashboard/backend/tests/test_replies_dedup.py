@@ -111,12 +111,14 @@ def test_dedup_treats_subject_change_as_new_reply(db):
 def test_unique_constraint_still_blocks_same_msgid(db):
     """The Message-ID UNIQUE constraint is still our first line of
     defence (cheaper than content match). This locks it in."""
-    import sqlite3
+    from sqlalchemy.exc import IntegrityError
 
     lead_id = _seed_lead(db)
     _insert_reply(db, lead_id, "same.msgid@x.com", "body 1")
     try:
         _insert_reply(db, lead_id, "same.msgid@x.com", "body 2 different")
-    except sqlite3.IntegrityError:
-        return
+    except (IntegrityError, Exception) as exc:
+        # Accept both sqlalchemy and psycopg2 integrity errors
+        if "unique" in str(exc).lower() or "duplicate" in str(exc).lower():
+            return
     raise AssertionError("expected IntegrityError on duplicate gmail_msg_id")

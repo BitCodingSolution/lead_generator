@@ -25,4 +25,4 @@ $env:DASHBOARD_REQUIRE_AUTH = "1"
 # redeploys.
 # $env:DASHBOARD_API_KEY = "..."
 
-python -m uvicorn main:app --host 127.0.0.1 --port 8900
+python -m uvicorn main:app --host 127.0.0.1 --port 8000

@@ -1,5 +1,5 @@
 const BASE =
-  process.env.NEXT_PUBLIC_API_URL || "http://localhost:8900"
+  process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
 
 // API key plumbing. Priority:
 //   1. NEXT_PUBLIC_DASHBOARD_API_KEY  (set at build time)
