@@ -3,6 +3,7 @@ import { Geist, Geist_Mono } from "next/font/google"
 import "./globals.css"
 import { Toaster } from "@/components/ui/sonner"
 import { CmdPalette } from "@/components/cmd-palette"
+import { AuthProvider } from "@/components/auth/auth-provider"
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -29,7 +30,7 @@ export default function RootLayout({
       suppressHydrationWarning
     >
       <body className="min-h-full bg-background text-foreground">
-        {children}
+        <AuthProvider>{children}</AuthProvider>
         <CmdPalette />
         <Toaster
           theme="dark"

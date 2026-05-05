@@ -39,6 +39,8 @@ if config.config_file_name is not None and not config.attributes.get("skip_loggi
 # -- Import all models so Alembic sees their tables -------------------------
 # linkedin_db.Base is the declarative_base() that every model inherits from.
 from linkedin_db import Base  # noqa: E402
+# Side-effect import: registers the dashboard_users table on Base.metadata.
+from app.auth import users as _auth_users  # noqa: E402, F401
 
 target_metadata = Base.metadata
 

@@ -29,6 +29,8 @@ dist/
 .env.*.local
 .api_key
 api_key.txt
+.jwt_secret
+dashboard/backend/.jwt_secret
 
 # Personal profile used by reply drafter to fill screening forms.
 # Contains DOB / mobile / CTC / etc. — never commit.

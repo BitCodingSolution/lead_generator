@@ -8,6 +8,7 @@ import { api, swrFetcher } from "@/lib/api"
 import type { Health } from "@/lib/types"
 import { Search, Activity, Plug, Loader2 } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { UserMenu } from "@/components/auth/user-menu"
 
 export function Topbar() {
   const { data: health, error } = useSWR<Health>("/api/health", swrFetcher, {
@@ -103,6 +104,7 @@ export function Topbar() {
           <Activity className="size-3" />
           <span>{ok ? "API online" : "API offline"}</span>
         </div>
+        <UserMenu />
       </div>
     </div>
   )
