@@ -9,7 +9,7 @@ import datetime as dt
 
 import pytest
 
-import linkedin_api as api
+from app.linkedin import api as api
 
 
 _NOW = "2026-04-30T19:50:00"

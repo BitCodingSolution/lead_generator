@@ -20,7 +20,7 @@ from typing import Optional
 
 import requests
 
-from linkedin_db import connect
+from app.linkedin.db import connect
 
 # How long a stored entry stays valid before we'd re-fetch. Shortish so
 # stale "we just rebranded" cases self-heal in a quarter.

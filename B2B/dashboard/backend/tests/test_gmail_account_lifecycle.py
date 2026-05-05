@@ -10,7 +10,7 @@ import datetime as dt
 
 import pytest
 
-import linkedin_gmail as gmail
+from app.linkedin.services import gmail
 
 
 # ---- _cooldown_remaining_s -------------------------------------------------

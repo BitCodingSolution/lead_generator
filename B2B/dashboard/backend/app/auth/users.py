@@ -14,7 +14,7 @@ from sqlalchemy import Column, Index, Integer, Text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from linkedin_db import Base, SessionLocal, get_engine
+from app.linkedin.db import Base, SessionLocal, get_engine
 
 
 # ---------------------------------------------------------------------------

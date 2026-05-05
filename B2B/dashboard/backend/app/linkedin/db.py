@@ -748,14 +748,17 @@ def init() -> None:
     from alembic.config import Config as AlembicConfig
     from alembic import command as alembic_command
 
+    # alembic.ini + migrations/ live at the backend root; this file is at
+    # backend/app/linkedin/db.py, so step up two levels.
+    _BACKEND_ROOT = Path(__file__).resolve().parents[2]
     alembic_cfg = AlembicConfig(
-        str(Path(__file__).resolve().parent / "alembic.ini")
+        str(_BACKEND_ROOT / "alembic.ini")
     )
     # Override the script_location to be absolute so it works regardless
     # of the cwd when the app is launched.
     alembic_cfg.set_main_option(
         "script_location",
-        str(Path(__file__).resolve().parent / "migrations"),
+        str(_BACKEND_ROOT / "migrations"),
     )
     # Pass the engine's URL so Alembic doesn't need to re-read .env
     alembic_cfg.set_main_option(

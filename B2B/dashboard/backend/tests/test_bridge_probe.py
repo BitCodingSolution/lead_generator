@@ -9,7 +9,7 @@ from unittest.mock import patch, MagicMock
 
 import requests
 
-import linkedin_claude
+from app.linkedin.services import claude as linkedin_claude
 
 
 def _mock_response(status: int, json_body=None, raise_for_json=False):

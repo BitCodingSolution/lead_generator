@@ -47,7 +47,7 @@ from typing import Optional
 
 from cryptography.fernet import Fernet, InvalidToken
 
-from linkedin_db import DB_PATH, connect
+from app.linkedin.db import DB_PATH, connect
 
 SMTP_HOST = "smtp.gmail.com"
 SMTP_PORT = 465

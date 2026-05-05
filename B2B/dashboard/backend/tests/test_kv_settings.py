@@ -1,7 +1,7 @@
 """Tests for the kv_settings runtime-config helpers."""
 from __future__ import annotations
 
-import linkedin_db
+from app.linkedin import db as linkedin_db
 
 
 def test_setting_returns_default_when_unset(db, monkeypatch):

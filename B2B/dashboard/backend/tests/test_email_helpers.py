@@ -1,7 +1,7 @@
 """Pure-function tests for the IMAP polling helpers — no DB, no network."""
 from __future__ import annotations
 
-import linkedin_gmail as gmail
+from app.linkedin.services import gmail
 
 
 # ---- _extract_addr ---------------------------------------------------------

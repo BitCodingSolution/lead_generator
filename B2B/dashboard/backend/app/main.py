@@ -202,11 +202,32 @@ app.include_router(bridge_router)
 # LinkedIn (kept as separate top-level routers — full refactor later)
 # ---------------------------------------------------------------------------
 
-from linkedin_api import router as linkedin_router  # noqa: E402
-from linkedin_extras import router as linkedin_extras_router, reset_orphans as _reset_orphans  # noqa: E402
+from app.linkedin.extras import reset_orphans as _reset_orphans  # noqa: E402
+from app.linkedin.routers.overview import router as linkedin_overview_router  # noqa: E402
+from app.linkedin.routers.leads import router as linkedin_leads_router  # noqa: E402
+from app.linkedin.routers.extension import router as linkedin_extension_router  # noqa: E402
+from app.linkedin.routers.drafts import router as linkedin_drafts_router  # noqa: E402
+from app.linkedin.routers.gmail import router as linkedin_gmail_router  # noqa: E402
+from app.linkedin.routers.replies import router as linkedin_replies_router  # noqa: E402
+from app.linkedin.routers.send import router as linkedin_send_router  # noqa: E402
+from app.linkedin.routers.maintenance import router as linkedin_maintenance_router  # noqa: E402
+from app.linkedin.routers.blocklist import router as linkedin_blocklist_router  # noqa: E402
+from app.linkedin.routers.cvs import router as linkedin_cvs_router  # noqa: E402
+from app.linkedin.routers.followups import router as linkedin_followups_router  # noqa: E402
+from app.linkedin.routers.analytics import router as linkedin_analytics_router  # noqa: E402
 
-app.include_router(linkedin_router)
-app.include_router(linkedin_extras_router)
+app.include_router(linkedin_overview_router)
+app.include_router(linkedin_leads_router)
+app.include_router(linkedin_extension_router)
+app.include_router(linkedin_drafts_router)
+app.include_router(linkedin_gmail_router)
+app.include_router(linkedin_replies_router)
+app.include_router(linkedin_send_router)
+app.include_router(linkedin_maintenance_router)
+app.include_router(linkedin_blocklist_router)
+app.include_router(linkedin_cvs_router)
+app.include_router(linkedin_followups_router)
+app.include_router(linkedin_analytics_router)
 
 
 # ---------------------------------------------------------------------------
