@@ -163,7 +163,7 @@ def gmail_test(account_id: Optional[int] = None):
     if acc_id is not None:
         with connect() as con:
             con.execute(
-                "UPDATE gmail_accounts SET last_verified_at = ? WHERE id = ?",
+                "UPDATE ln_gmail_accounts SET last_verified_at = ? WHERE id = ?",
                 (now, acc_id),
             )
             con.commit()

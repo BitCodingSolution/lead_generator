@@ -32,7 +32,7 @@ from typing import Optional
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
-from app.linkedin.db import DB_PATH, connect
+from app.linkedin.db import connect
 from app.linkedin.schemas import BlocklistBulkIn, BlocklistIn, CVMeta, FollowupRunIn
 
 
@@ -42,7 +42,9 @@ import io
 from fastapi.responses import PlainTextResponse
 
 CV_CLUSTERS = ("python", "ml", "ai_llm", "fullstack", "scraping", "n8n", "default")
-CV_STORAGE_DIR = DB_PATH.parent / "cvs"
+# CVs are served by the FastAPI static mount (see app.main: /static).
+# `app/static/cvs/` lives one level above `app/linkedin/extras.py`.
+CV_STORAGE_DIR = Path(__file__).resolve().parents[1] / "static" / "cvs"
 
 # How long a lead can sit in Sending/Queued before we call it orphaned.
 ORPHAN_AFTER_MINUTES = 10
@@ -60,7 +62,7 @@ def _now_iso() -> str:
 
 def _log(con, kind: str, lead_id: Optional[int] = None, meta: Optional[dict] = None):
     con.execute(
-        "INSERT INTO events (at, kind, lead_id, meta_json) VALUES (?, ?, ?, ?)",
+        "INSERT INTO ln_events (at, kind, lead_id, meta_json) VALUES (?, ?, ?, ?)",
         (_now_iso(), kind, lead_id, json.dumps(meta) if meta else None),
     )
 
@@ -76,7 +78,7 @@ def reset_orphans() -> dict:
     )
     with connect() as con:
         cur = con.execute(
-            "UPDATE leads SET status = 'Drafted' "
+            "UPDATE ln_leads SET status = 'Drafted' "
             "WHERE status IN ('Sending', 'Queued') "
             "  AND (sent_at IS NULL OR sent_at < ?) "
             "  AND (queued_at IS NULL OR queued_at < ?)",
@@ -95,17 +97,17 @@ def reset_orphans() -> dict:
 
 def _archive_lead_inline(con, lead_id: int, reason: str) -> None:
     """Copy of _archive_lead from linkedin_api to avoid circular import."""
-    row = con.execute("SELECT * FROM leads WHERE id = ?", (lead_id,)).fetchone()
+    row = con.execute("SELECT * FROM ln_leads WHERE id = ?", (lead_id,)).fetchone()
     if row is None:
         return
     payload = {k: row[k] for k in row.keys()}
     con.execute(
-        "INSERT OR REPLACE INTO recyclebin "
+        "INSERT OR REPLACE INTO ln_recyclebin "
         "(original_id, post_url, payload_json, reason, moved_at) "
         "VALUES (?, ?, ?, ?, ?)",
         (lead_id, row["post_url"], json.dumps(payload), reason, _now_iso()),
     )
-    con.execute("DELETE FROM leads WHERE id = ?", (lead_id,))
+    con.execute("DELETE FROM ln_leads WHERE id = ?", (lead_id,))
 
 
 
@@ -130,7 +132,7 @@ _EMAIL_RE  = re.compile(r"^[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}$")
 
 def _archive_matching_leads(con, kind: str, value: str, reason: str) -> int:
     """Move leads already in the DB that match a newly-added blocklist
-    entry into recyclebin. Prevents them from appearing in Drafted queues
+    entry into ln_recyclebin. Prevents them from appearing in Drafted queues
     after the block rule is added. Returns count archived.
 
     Only touches leads that haven't been Sent yet — already-sent leads are
@@ -138,21 +140,21 @@ def _archive_matching_leads(con, kind: str, value: str, reason: str) -> int:
     value = value.lower()
     if kind == "email":
         rows = con.execute(
-            "SELECT id FROM leads "
+            "SELECT id FROM ln_leads "
             "WHERE LOWER(TRIM(email)) = ? AND status != 'Sent'",
             (value,),
         ).fetchall()
     elif kind == "domain":
         # Match emails ending in @<domain> OR @sub.<domain>.
         rows = con.execute(
-            "SELECT id FROM leads WHERE status != 'Sent' AND ("
+            "SELECT id FROM ln_leads WHERE status != 'Sent' AND ("
             "  LOWER(email) LIKE ? OR LOWER(email) LIKE ?"
             ")",
             (f"%@{value}", f"%.{value}"),
         ).fetchall()
     elif kind == "company":
         rows = con.execute(
-            "SELECT id FROM leads "
+            "SELECT id FROM ln_leads "
             "WHERE status != 'Sent' AND LOWER(COALESCE(company, '')) LIKE ?",
             (f"%{value}%",),
         ).fetchall()
@@ -162,11 +164,11 @@ def _archive_matching_leads(con, kind: str, value: str, reason: str) -> int:
     archived = 0
     for r in rows:
         lead_id = r["id"]
-        row = con.execute("SELECT * FROM leads WHERE id = ?", (lead_id,)).fetchone()
+        row = con.execute("SELECT * FROM ln_leads WHERE id = ?", (lead_id,)).fetchone()
         if row is None:
             continue
         con.execute(
-            "INSERT OR REPLACE INTO recyclebin "
+            "INSERT OR REPLACE INTO ln_recyclebin "
             "(original_id, post_url, payload_json, reason, moved_at) "
             "VALUES (?, ?, ?, ?, ?)",
             (
@@ -176,7 +178,7 @@ def _archive_matching_leads(con, kind: str, value: str, reason: str) -> int:
                 _now_iso(),
             ),
         )
-        con.execute("DELETE FROM leads WHERE id = ?", (lead_id,))
+        con.execute("DELETE FROM ln_leads WHERE id = ?", (lead_id,))
         archived += 1
     return archived
 
@@ -204,7 +206,7 @@ def is_blocked(company: Optional[str], email: Optional[str]) -> Optional[dict]:
         return None
     with connect() as con:
         rows = con.execute(
-            "SELECT kind, value, reason FROM blocklist"
+            "SELECT kind, value, reason FROM ln_blocklist"
         ).fetchall()
     for r in rows:
         v = r["value"]
@@ -248,7 +250,7 @@ def pick_cv_path(cluster: Optional[str]) -> Optional[tuple[Path, str]]:
     key = cluster if cluster in CV_CLUSTERS else "default"
     with connect() as con:
         row = con.execute(
-            "SELECT stored_path, filename FROM cvs WHERE cluster = ?", (key,)
+            "SELECT stored_path, filename FROM ln_cvs WHERE cluster = ?", (key,)
         ).fetchone()
         # Only fall back to default when the caller explicitly had no
         # specialty (cluster was unknown → key == 'default' already) OR
@@ -271,7 +273,7 @@ def cv_required_but_missing(cluster: Optional[str]) -> Optional[str]:
         return None  # generic — default slot (if any) is fine
     with connect() as con:
         row = con.execute(
-            "SELECT 1 FROM cvs WHERE cluster = ?", (c,)
+            "SELECT 1 FROM ln_cvs WHERE cluster = ?", (c,)
         ).fetchone()
     return None if row else c
 
@@ -355,7 +357,6 @@ __all__ = [
     'CVMeta',
     'CV_CLUSTERS',
     'CV_STORAGE_DIR',
-    'DB_PATH',
     'FOLLOWUP_DAYS',
     'FOLLOWUP_TEMPLATE_1',
     'FOLLOWUP_TEMPLATE_2',

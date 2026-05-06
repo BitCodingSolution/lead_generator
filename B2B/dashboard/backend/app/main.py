@@ -13,20 +13,21 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.auth.router import router as auth_router
 from app.config import settings
 from app.deps import authenticate_request
-from app.routers.actions import router as actions_router
-from app.routers.batches import router as batches_router
-from app.routers.bridge import router as bridge_router
-from app.routers.jobs import router as jobs_router
-from app.routers.leads import router as leads_router
-from app.routers.overview import router as overview_router
-from app.routers.replies import router as replies_router
-from app.routers.source_actions import router as source_actions_router
-from app.routers.sources import router as sources_router
-from app.services.sources import Source, register_source
+from app.marcel.routers.actions import router as actions_router
+from app.marcel.routers.batches import router as batches_router
+from app.marcel.routers.bridge import router as bridge_router
+from app.marcel.routers.jobs import router as jobs_router
+from app.marcel.routers.leads import router as leads_router
+from app.marcel.routers.overview import router as overview_router
+from app.marcel.routers.replies import router as replies_router
+from app.marcel.routers.source_actions import router as source_actions_router
+from app.marcel.routers.sources import router as sources_router
+from app.marcel.services.sources import Source, register_source
 
 # ---------------------------------------------------------------------------
 # App factory
@@ -56,7 +57,6 @@ app.add_middleware(
 register_source(Source(
     id="marcel",
     label="Marcel Data",
-    db_path=settings.db_path,
     type="outreach",
     icon="Mail",
     description="Primary outreach dataset — already in the B2B pipeline.",
@@ -65,8 +65,10 @@ register_source(Source(
 register_source(Source(
     id="ycombinator",
     label="Y Combinator",
-    db_path=settings.grab_root / "sources" / "ycombinator" / "data.db",
     type="grab",
+    leads_table="yc_leads",
+    founders_table="yc_founders",
+    exported_table="yc_exported_leads",
     schema_path=settings.grab_root / "sources" / "ycombinator" / "schema.json",
     icon="Rocket",
     description="YC portfolio companies — funded, US-heavy, actively hiring.",
@@ -116,9 +118,17 @@ EXT_KEY_PATHS: set[str] = {
     "/api/linkedin/account-warning",
 }
 
+# URL prefixes that bypass auth — the static mount lives here so PDF
+# links open directly in the browser without bearer-token plumbing.
+PUBLIC_PREFIXES: tuple[str, ...] = (
+    "/static/",
+)
+
 
 def _is_public(path: str) -> bool:
-    return path in PUBLIC_PATHS or path in EXT_KEY_PATHS
+    if path in PUBLIC_PATHS or path in EXT_KEY_PATHS:
+        return True
+    return any(path.startswith(p) for p in PUBLIC_PREFIXES)
 
 
 def _attach_cors_headers(request: Request, response: JSONResponse) -> JSONResponse:
@@ -229,6 +239,14 @@ app.include_router(linkedin_cvs_router)
 app.include_router(linkedin_followups_router)
 app.include_router(linkedin_analytics_router)
 
+# Static assets — currently the LinkedIn CV PDFs under app/static/cvs/.
+# Served at /static/* (e.g. /static/cvs/fullstack__Jaydip_CV_Full_Stack.pdf).
+from pathlib import Path as _Path  # noqa: E402
+
+_STATIC_DIR = _Path(__file__).resolve().parent / "static"
+_STATIC_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
+
 
 # ---------------------------------------------------------------------------
 # Startup hooks
@@ -236,7 +254,7 @@ app.include_router(linkedin_analytics_router)
 
 # @app.on_event("startup")
 # def _start_scheduler() -> None:
-#     from app.services.schedules import start_scheduler_thread
+#     from app.marcel.services.schedules import start_scheduler_thread
 #     start_scheduler_thread()
 
 

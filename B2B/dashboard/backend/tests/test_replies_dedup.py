@@ -18,7 +18,7 @@ _NOW = "2026-04-30T19:50:00"
 
 def _seed_lead(con) -> int:
     cur = con.execute(
-        "INSERT INTO leads (post_url, email, status, first_seen_at, last_seen_at, "
+        "INSERT INTO ln_leads (post_url, email, status, first_seen_at, last_seen_at, "
         "sent_at, sent_message_id, gen_subject, gen_body) "
         "VALUES (?, ?, 'Sent', ?, ?, ?, ?, ?, ?)",
         (
@@ -36,7 +36,7 @@ def _seed_lead(con) -> int:
 
 def _insert_reply(con, lead_id, msg_id, body, subject="Re: ...", from_email="ayushi@etoilelune.com"):
     con.execute(
-        "INSERT INTO replies (lead_id, gmail_msg_id, from_email, subject, snippet, "
+        "INSERT INTO ln_replies (lead_id, gmail_msg_id, from_email, subject, snippet, "
         "body, received_at, kind) VALUES (?, ?, ?, ?, ?, ?, ?, 'reply')",
         (lead_id, msg_id, from_email, subject, body[:200], body, _NOW),
     )
@@ -48,7 +48,7 @@ def _content_dup_exists(con, lead_id, from_email, subject, body) -> bool:
     SQL drifts, the polling path drifts too — the test is here to keep
     both in lock-step."""
     return con.execute(
-        "SELECT 1 FROM replies WHERE lead_id = ? AND from_email = ? "
+        "SELECT 1 FROM ln_replies WHERE lead_id = ? AND from_email = ? "
         "AND subject = ? AND body = ? LIMIT 1",
         (lead_id, from_email, subject, body),
     ).fetchone() is not None

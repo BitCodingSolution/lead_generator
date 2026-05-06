@@ -3,7 +3,8 @@
 import * as React from "react"
 import useSWR, { mutate } from "swr"
 import {
-  FileText, Upload, Trash2, Check, Loader2, AlertCircle,
+  FileText, Upload, Trash2, Check, Loader2, AlertCircle, Eye, X,
+  ExternalLink,
 } from "lucide-react"
 import { api, getAuthHeaders, swrFetcher } from "@/lib/api"
 import { cn } from "@/lib/utils"
@@ -12,6 +13,7 @@ type CV = {
   id: number
   cluster: string
   filename: string
+  stored_path: string | null
   size_bytes: number | null
   uploaded_at: string
 }
@@ -36,6 +38,8 @@ export function LinkedInCVsCard() {
 
   const byCluster = new Map<string, CV>()
   for (const r of data?.rows ?? []) byCluster.set(r.cluster, r)
+
+  const [preview, setPreview] = React.useState<CV | null>(null)
 
   return (
     <div className="rounded-xl border border-zinc-800/80 bg-[#18181b] p-4">
@@ -68,12 +72,15 @@ export function LinkedInCVsCard() {
             key={c}
             cluster={c}
             existing={byCluster.get(c)}
+            onPreview={setPreview}
           />
         ))}
         {isLoading && (
           <div className="col-span-2 p-4 text-xs text-zinc-500">Loading…</div>
         )}
       </div>
+
+      <CvPreviewModal cv={preview} onClose={() => setPreview(null)} />
     </div>
   )
 }
@@ -81,9 +88,11 @@ export function LinkedInCVsCard() {
 function ClusterSlot({
   cluster,
   existing,
+  onPreview,
 }: {
   cluster: string
   existing: CV | undefined
+  onPreview: (cv: CV) => void
 }) {
   const [busy, setBusy] = React.useState(false)
   const [dragging, setDragging] = React.useState(false)
@@ -165,19 +174,32 @@ function ClusterSlot({
       <div className="text-[11px] text-zinc-500 mb-2">{CLUSTER_HINT[cluster]}</div>
 
       {existing ? (
-        <div className="flex items-center justify-between text-[11px]">
+        <div className="flex items-center justify-between text-[11px] gap-2">
           <div className="min-w-0">
             <div className="text-zinc-300 truncate">{existing.filename}</div>
             <div className="text-zinc-500 tnum">
               {fmtSize(existing.size_bytes)}
             </div>
           </div>
-          <button
-            onClick={(e) => { e.stopPropagation(); onDelete() }}
-            className="p-1 rounded hover:bg-rose-500/20 text-zinc-500 hover:text-rose-300"
-          >
-            <Trash2 className="size-3" />
-          </button>
+          <div className="flex items-center gap-0.5 shrink-0">
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); onPreview(existing) }}
+              disabled={!existing.stored_path}
+              title={existing.stored_path ? "Preview PDF" : "File not available"}
+              className="p-1.5 rounded hover:bg-zinc-700/60 text-zinc-400 hover:text-zinc-100 disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              <Eye className="size-3.5" />
+            </button>
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); onDelete() }}
+              title="Delete"
+              className="p-1.5 rounded hover:bg-rose-500/20 text-zinc-500 hover:text-rose-300"
+            >
+              <Trash2 className="size-3.5" />
+            </button>
+          </div>
         </div>
       ) : (
         <div className="flex items-center gap-1.5 text-[11px] text-zinc-500">
@@ -214,4 +236,93 @@ function fmtSize(b: number | null): string {
   if (b < 1024) return `${b} B`
   if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`
   return `${(b / 1024 / 1024).toFixed(2)} MB`
+}
+
+function CvPreviewModal({
+  cv,
+  onClose,
+}: {
+  cv: CV | null
+  onClose: () => void
+}) {
+  // Resolve the static URL on the API origin (the static mount lives on
+  // the backend, not the Next.js host). `stored_path` already starts with
+  // a leading slash, so a simple concatenation produces the full URL.
+  const url = React.useMemo(() => {
+    if (!cv?.stored_path) return null
+    return `${api.base}${cv.stored_path}`
+  }, [cv])
+
+  // Esc closes; lock body scroll while open. Both effects are no-ops when
+  // the modal is hidden so the early-return below is safe.
+  React.useEffect(() => {
+    if (!cv) return
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") onClose()
+    }
+    window.addEventListener("keydown", onKey)
+    const prevOverflow = document.body.style.overflow
+    document.body.style.overflow = "hidden"
+    return () => {
+      window.removeEventListener("keydown", onKey)
+      document.body.style.overflow = prevOverflow
+    }
+  }, [cv, onClose])
+
+  if (!cv || !url) return null
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label={`Preview ${cv.filename}`}
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-2 sm:p-6"
+      onClick={onClose}
+    >
+      <div
+        className="relative flex h-full w-full max-w-5xl flex-col overflow-hidden rounded-lg border border-zinc-800 bg-[#0a0a0a] shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center gap-3 border-b border-zinc-800 px-3 py-2 sm:px-4">
+          <FileText className="size-4 text-zinc-400 shrink-0" />
+          <div className="min-w-0 flex-1">
+            <div className="truncate text-sm font-medium text-zinc-100" title={cv.filename}>
+              {cv.filename}
+            </div>
+            <div className="truncate text-[11px] text-zinc-500">
+              <span className="font-mono">{cv.cluster}</span>
+              <span className="mx-1.5 text-zinc-700">·</span>
+              {fmtSize(cv.size_bytes)}
+            </div>
+          </div>
+          <a
+            href={url}
+            target="_blank"
+            rel="noopener noreferrer"
+            title="Open in new tab"
+            className="hidden sm:inline-flex items-center gap-1 rounded border border-zinc-800 px-2 py-1 text-[11px] text-zinc-400 hover:text-zinc-100 hover:border-zinc-700"
+          >
+            <ExternalLink className="size-3" />
+            Open
+          </a>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close preview"
+            className="rounded p-1.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"
+          >
+            <X className="size-4" />
+          </button>
+        </div>
+
+        <div className="relative flex-1 bg-zinc-900">
+          <iframe
+            src={url}
+            title={cv.filename}
+            className="absolute inset-0 h-full w-full bg-white"
+          />
+        </div>
+      </div>
+    </div>
+  )
 }

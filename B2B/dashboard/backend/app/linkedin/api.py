@@ -112,11 +112,11 @@ def _today() -> str:
 
 def _roll_daily_counter(con) -> None:
     row = con.execute(
-        "SELECT daily_sent_count, daily_sent_date FROM safety_state WHERE id=1"
+        "SELECT daily_sent_count, daily_sent_date FROM ln_safety_state WHERE id=1"
     ).fetchone()
     if row and row["daily_sent_date"] != _today():
         con.execute(
-            "UPDATE safety_state SET daily_sent_count=0, daily_sent_date=? WHERE id=1",
+            "UPDATE ln_safety_state SET daily_sent_count=0, daily_sent_date=? WHERE id=1",
             (_today(),),
         )
         con.commit()
@@ -265,12 +265,12 @@ def _require_ext_key(x_ext_key: Optional[str]) -> str:
         raise HTTPException(401, "Missing X-Ext-Key header")
     with connect() as con:
         row = con.execute(
-            "SELECT key FROM extension_keys WHERE key = ?", (x_ext_key,)
+            "SELECT key FROM ln_extension_keys WHERE key = ?", (x_ext_key,)
         ).fetchone()
         if row is None:
             raise HTTPException(401, "Invalid extension key")
         con.execute(
-            "UPDATE extension_keys SET last_used_at = ? WHERE key = ?",
+            "UPDATE ln_extension_keys SET last_used_at = ? WHERE key = ?",
             (dt.datetime.now().isoformat(timespec="seconds"), x_ext_key),
         )
         con.commit()
@@ -294,7 +294,7 @@ def _require_ext_key(x_ext_key: Optional[str]) -> str:
 
 def _log_event(con, kind: str, lead_id: Optional[int] = None, meta: Optional[dict] = None):
     con.execute(
-        "INSERT INTO events (at, kind, lead_id, meta_json) VALUES (?, ?, ?, ?)",
+        "INSERT INTO ln_events (at, kind, lead_id, meta_json) VALUES (?, ?, ?, ?)",
         (
             dt.datetime.now().isoformat(timespec="seconds"),
             kind,
@@ -314,7 +314,7 @@ def _upsert_lead(con, p: IngestPost) -> tuple[int, str]:
     caller archives it in the same transaction."""
     now = dt.datetime.now().isoformat(timespec="seconds")
     row = con.execute(
-        "SELECT id, email, status FROM leads WHERE post_url = ?", (p.post_url,)
+        "SELECT id, email, status FROM ln_leads WHERE post_url = ?", (p.post_url,)
     ).fetchone()
 
     has_draft = bool((p.gen_subject or "").strip() and (p.gen_body or "").strip())
@@ -326,9 +326,9 @@ def _upsert_lead(con, p: IngestPost) -> tuple[int, str]:
         # full payload) and archived_urls (shadow dedup that survives a
         # recyclebin clear).
         dup = con.execute(
-            "SELECT 1 FROM recyclebin WHERE post_url = ? "
+            "SELECT 1 FROM ln_recyclebin WHERE post_url = ? "
             "UNION ALL "
-            "SELECT 1 FROM archived_urls WHERE post_url = ? "
+            "SELECT 1 FROM ln_archived_urls WHERE post_url = ? "
             "LIMIT 1",
             (p.post_url, p.post_url),
         ).fetchone()
@@ -343,7 +343,7 @@ def _upsert_lead(con, p: IngestPost) -> tuple[int, str]:
             cs = None
         reviewed_at = now if cs else None
         cur = con.execute(
-            """INSERT INTO leads (post_url, posted_by, company, role, tech_stack,
+            """INSERT INTO ln_leads (post_url, posted_by, company, role, tech_stack,
                rate, location, tags, post_text, email, phone,
                gen_subject, gen_body, email_mode, cv_cluster,
                skip_reason, skip_source, status,
@@ -394,11 +394,11 @@ def _upsert_lead(con, p: IngestPost) -> tuple[int, str]:
 
     sets = ", ".join(f"{k} = COALESCE(?, {k})" for k in fields)
     vals = [*fields.values(), lead_id]
-    con.execute(f"UPDATE leads SET {sets} WHERE id = ?", vals)
+    con.execute(f"UPDATE ln_leads SET {sets} WHERE id = ?", vals)
     # Bump status to Drafted if we just filled in a draft on a 'New' row.
     if has_draft and row["status"] == "New":
         con.execute(
-            "UPDATE leads SET status = 'Drafted' WHERE id = ?", (lead_id,)
+            "UPDATE ln_leads SET status = 'Drafted' WHERE id = ?", (lead_id,)
         )
     return lead_id, "updated"
 
@@ -424,12 +424,12 @@ def _upsert_lead(con, p: IngestPost) -> tuple[int, str]:
 
 
 def _archive_lead(con, lead_id: int, reason: str) -> None:
-    row = con.execute("SELECT * FROM leads WHERE id = ?", (lead_id,)).fetchone()
+    row = con.execute("SELECT * FROM ln_leads WHERE id = ?", (lead_id,)).fetchone()
     if row is None:
         raise HTTPException(404, "Lead not found")
     payload = {k: row[k] for k in row.keys()}
     con.execute(
-        "INSERT OR REPLACE INTO recyclebin "
+        "INSERT OR REPLACE INTO ln_recyclebin "
         "(original_id, post_url, payload_json, reason, moved_at) "
         "VALUES (?, ?, ?, ?, ?)",
         (
@@ -440,7 +440,7 @@ def _archive_lead(con, lead_id: int, reason: str) -> None:
             dt.datetime.now().isoformat(timespec="seconds"),
         ),
     )
-    con.execute("DELETE FROM leads WHERE id = ?", (lead_id,))
+    con.execute("DELETE FROM ln_leads WHERE id = ?", (lead_id,))
     _log_event(con, "archive", lead_id=lead_id, meta={"reason": reason})
 
 
@@ -500,7 +500,7 @@ _batch_context: dict = {
 def _generate_one(lead_id: int) -> str:
     """Generate and persist one lead's draft. Returns 'drafted' | 'skipped' | 'failed'."""
     with connect() as con:
-        row = con.execute("SELECT * FROM leads WHERE id = ?", (lead_id,)).fetchone()
+        row = con.execute("SELECT * FROM ln_leads WHERE id = ?", (lead_id,)).fetchone()
     if row is None or row["status"] != "New":
         return "skipped"
 
@@ -547,7 +547,7 @@ def _generate_one(lead_id: int) -> str:
     with connect() as con:
         if result.should_skip:
             con.execute(
-                "UPDATE leads SET gen_subject = ?, gen_body = ?, email_mode = ?, "
+                "UPDATE ln_leads SET gen_subject = ?, gen_body = ?, email_mode = ?, "
                 "cv_cluster = ?, skip_reason = ?, skip_source = ?, "
                 "status = 'Skipped' WHERE id = ?",
                 (result.subject, result.body, result.email_mode,
@@ -571,7 +571,7 @@ def _generate_one(lead_id: int) -> str:
             return "failed"
 
         con.execute(
-            "UPDATE leads SET gen_subject = ?, gen_body = ?, email_mode = ?, "
+            "UPDATE ln_leads SET gen_subject = ?, gen_body = ?, email_mode = ?, "
             "cv_cluster = ?, status = 'Drafted', skip_reason = NULL, "
             "skip_source = NULL WHERE id = ?",
             (result.subject, result.body, result.email_mode,
@@ -679,7 +679,7 @@ def _effective_daily_cap(con) -> int:
     """
     rows = con.execute(
         "SELECT daily_cap, warmup_enabled, warmup_start_date, connected_at "
-        "FROM gmail_accounts WHERE status = 'active'"
+        "FROM ln_gmail_accounts WHERE status = 'active'"
     ).fetchall()
     curve = gmail.get_warmup_curve()
     total = 0
@@ -696,7 +696,7 @@ def _effective_daily_cap(con) -> int:
 def _check_safety_before_send(con, *, allow_quiet_hours: bool = False) -> None:
     """Raise HTTPException if any rail blocks sending. Returns cleanly otherwise."""
     _roll_daily_counter(con)
-    s = con.execute("SELECT * FROM safety_state WHERE id=1").fetchone()
+    s = con.execute("SELECT * FROM ln_safety_state WHERE id=1").fetchone()
     if s is None:
         raise HTTPException(500, "safety_state missing")
 
@@ -754,13 +754,13 @@ def _rescore(con, lead_id: int) -> None:
     row = con.execute(
         "SELECT email, role, tech_stack, company, phone, gen_subject, "
         "gen_body, posted_by, post_url, first_seen_at "
-        "FROM leads WHERE id = ?", (lead_id,),
+        "FROM ln_leads WHERE id = ?", (lead_id,),
     ).fetchone()
     if row is None:
         return
     score, reasons = linkedin_scoring.compute_score(dict(row))
     con.execute(
-        "UPDATE leads SET fit_score = ?, fit_score_reasons = ? WHERE id = ?",
+        "UPDATE ln_leads SET fit_score = ?, fit_score_reasons = ? WHERE id = ?",
         (score, json.dumps(reasons), lead_id),
     )
 
@@ -770,13 +770,13 @@ def _ensure_open_token(con, lead_id: int) -> str:
     just before send so every outgoing email has a tracking URL."""
     import secrets
     row = con.execute(
-        "SELECT open_token FROM leads WHERE id = ?", (lead_id,)
+        "SELECT open_token FROM ln_leads WHERE id = ?", (lead_id,)
     ).fetchone()
     if row and row["open_token"]:
         return row["open_token"]
     token = secrets.token_urlsafe(22)
     con.execute(
-        "UPDATE leads SET open_token = ? WHERE id = ?",
+        "UPDATE ln_leads SET open_token = ? WHERE id = ?",
         (token, lead_id),
     )
     return token
@@ -830,12 +830,12 @@ def _tracking_pixel_url(token: str) -> str | None:
 def _record_send(con, lead_id: int, message_id: str, sent_at: str,
                  account_id: int | None = None) -> None:
     con.execute(
-        "UPDATE leads SET status = 'Sent', sent_at = ?, sent_message_id = ?, "
+        "UPDATE ln_leads SET status = 'Sent', sent_at = ?, sent_message_id = ?, "
         "sent_via_account_id = ? WHERE id = ?",
         (sent_at, message_id, account_id, lead_id),
     )
     con.execute(
-        "UPDATE safety_state SET daily_sent_count = daily_sent_count + 1, "
+        "UPDATE ln_safety_state SET daily_sent_count = daily_sent_count + 1, "
         "last_send_at = ?, consecutive_failures = 0 WHERE id = 1",
         (sent_at,),
     )
@@ -845,7 +845,7 @@ def _record_send(con, lead_id: int, message_id: str, sent_at: str,
 
 def _record_failure(con, lead_id: int, err: str) -> None:
     con.execute(
-        "UPDATE safety_state SET consecutive_failures = consecutive_failures + 1 "
+        "UPDATE ln_safety_state SET consecutive_failures = consecutive_failures + 1 "
         "WHERE id = 1"
     )
     _log_event(con, "send_error", lead_id=lead_id, meta={"error": err[:400]})
@@ -866,7 +866,7 @@ def _recent_style_examples(con, limit: int = 5) -> list[dict]:
     rows = con.execute(
         """
         SELECT e.meta_json, e.at
-        FROM events e
+        FROM ln_events e
         WHERE e.kind = 'reply_sent'
         ORDER BY e.at DESC
         LIMIT ?
@@ -932,14 +932,14 @@ def _send_ooo_nudge(lead_id: int) -> dict:
     with connect() as con:
         lead = con.execute(
             "SELECT id, email, posted_by, gen_subject, sent_message_id, "
-            "sent_via_account_id FROM leads WHERE id = ?", (lead_id,),
+            "sent_via_account_id FROM ln_leads WHERE id = ?", (lead_id,),
         ).fetchone()
         if lead is None:
             raise RuntimeError("Lead not found")
         if not lead["email"]:
             raise RuntimeError("No email on lead")
         last = con.execute(
-            "SELECT gmail_msg_id FROM replies WHERE lead_id = ? AND kind = 'reply' "
+            "SELECT gmail_msg_id FROM ln_replies WHERE lead_id = ? AND kind = 'reply' "
             "ORDER BY received_at DESC LIMIT 1", (lead_id,),
         ).fetchone()
 
@@ -964,7 +964,7 @@ def _send_ooo_nudge(lead_id: int) -> dict:
     now = dt.datetime.now().astimezone().isoformat(timespec="seconds")
     with connect() as con:
         con.execute(
-            "UPDATE leads SET ooo_nudge_sent_at = ?, ooo_nudge_at = NULL "
+            "UPDATE ln_leads SET ooo_nudge_sent_at = ?, ooo_nudge_at = NULL "
             "WHERE id = ?", (now, lead_id),
         )
         _log_event(con, "ooo_nudge_sent", lead_id=lead_id,
@@ -979,7 +979,7 @@ def _scheduler_tick() -> dict:
     now = dt.datetime.now().astimezone().isoformat(timespec="seconds")
     with connect() as con:
         due = con.execute(
-            "SELECT id FROM leads "
+            "SELECT id FROM ln_leads "
             "WHERE scheduled_send_at IS NOT NULL "
             "  AND scheduled_send_at <= ? "
             "  AND status IN ('Drafted', 'New') "
@@ -1010,7 +1010,7 @@ def _scheduler_tick() -> dict:
             # for cleanliness.
             with connect() as con:
                 con.execute(
-                    "UPDATE leads SET scheduled_send_at = NULL WHERE id = ?",
+                    "UPDATE ln_leads SET scheduled_send_at = NULL WHERE id = ?",
                     (lead_id,),
                 )
                 con.commit()
@@ -1019,7 +1019,7 @@ def _scheduler_tick() -> dict:
     nudge_errors: list[dict] = []
     with connect() as con:
         due_nudges = con.execute(
-            "SELECT id FROM leads "
+            "SELECT id FROM ln_leads "
             "WHERE ooo_nudge_at IS NOT NULL AND ooo_nudge_at <= ? "
             "  AND ooo_nudge_sent_at IS NULL "
             "  AND (jaydip_note IS NULL OR TRIM(jaydip_note) = '') "
@@ -1086,7 +1086,7 @@ def _pick_ready_leads(con, limit: int) -> list[int]:
     """Leads that are fully ready to send: Drafted, have email, no private
     note. Ordered oldest-first so a batch drains the queue sensibly."""
     rows = con.execute(
-        "SELECT id FROM leads "
+        "SELECT id FROM ln_leads "
         "WHERE status = 'Drafted' "
         "  AND email IS NOT NULL AND TRIM(email) != '' "
         "  AND gen_subject IS NOT NULL AND TRIM(gen_subject) != '' "
@@ -1115,7 +1115,7 @@ def _batch_worker(lead_ids: list[int], source: str) -> None:
                 lead = con.execute(
                     "SELECT email, gen_subject, gen_body, jaydip_note, status, "
                     "       company, cv_cluster "
-                    "FROM leads WHERE id = ?", (lead_id,),
+                    "FROM ln_leads WHERE id = ?", (lead_id,),
                 ).fetchone()
                 if lead is None or lead["status"] == "Sent" or (
                     lead["jaydip_note"] or ""
@@ -1130,7 +1130,7 @@ def _batch_worker(lead_ids: list[int], source: str) -> None:
                     # Stall — upload the matching CV first. We flag the lead
                     # so the UI surfaces it rather than quietly dropping.
                     con.execute(
-                        "UPDATE leads SET needs_attention = 1 WHERE id = ?",
+                        "UPDATE ln_leads SET needs_attention = 1 WHERE id = ?",
                         (lead_id,),
                     )
                     _log_event(
@@ -1280,7 +1280,7 @@ def _followups_tick() -> None:
     enforced in run_followups -> send_email."""
     with connect() as con:
         s = con.execute(
-            "SELECT followups_autopilot, followups_hour FROM safety_state WHERE id=1"
+            "SELECT followups_autopilot, followups_hour FROM ln_safety_state WHERE id=1"
         ).fetchone()
     if not s or not s["followups_autopilot"]:
         return
@@ -1378,14 +1378,14 @@ def _stale_drafts_sweep() -> int:
     with connect() as con:
         rows = con.execute(
             "SELECT l.id "
-            "FROM leads l "
+            "FROM ln_leads l "
             "WHERE l.status = 'Drafted' "
             "  AND l.scheduled_send_at IS NULL "
             "  AND COALESCE(l.reviewed_at, '') = '' "
             "  AND COALESCE(l.jaydip_note, '') = '' "
             "  AND ( "
             "    SELECT COALESCE(MAX(e.at), l.first_seen_at) "
-            "    FROM events e "
+            "    FROM ln_events e "
             "    WHERE e.lead_id = l.id AND e.kind = 'draft' "
             "  ) < ? ",
             (cutoff,),
@@ -1416,7 +1416,7 @@ def _autopilot_tick() -> None:
         s = con.execute(
             "SELECT autopilot_enabled, autopilot_hour, autopilot_minute, "
             "autopilot_count, autopilot_tz "
-            "FROM safety_state WHERE id=1"
+            "FROM ln_safety_state WHERE id=1"
         ).fetchone()
     if not s or not s["autopilot_enabled"]:
         return
@@ -1456,7 +1456,7 @@ def _autopilot_tick() -> None:
         _autopilot_state["last_fired_date"] = today
         with connect() as con:
             con.execute(
-                "INSERT OR REPLACE INTO autopilot_runs "
+                "INSERT OR REPLACE INTO ln_autopilot_runs "
                 "(fired_at, fired_date, total_queued, status) VALUES (?, ?, ?, ?)",
                 (
                     dt.datetime.now().isoformat(timespec="seconds"),
@@ -1475,7 +1475,7 @@ def _autopilot_tick() -> None:
         status = status_map.get(e.status_code, "skipped_other")
         with connect() as con:
             con.execute(
-                "INSERT OR REPLACE INTO autopilot_runs "
+                "INSERT OR REPLACE INTO ln_autopilot_runs "
                 "(fired_at, fired_date, total_queued, status) VALUES (?, ?, ?, ?)",
                 (
                     dt.datetime.now().isoformat(timespec="seconds"),
@@ -1508,11 +1508,11 @@ def _auto_draft_for_reply(reply_id: int, lead_id: int) -> None:
     try:
         with connect() as con:
             lead = con.execute(
-                "SELECT posted_by, gen_subject, gen_body FROM leads WHERE id = ?",
+                "SELECT posted_by, gen_subject, gen_body FROM ln_leads WHERE id = ?",
                 (lead_id,),
             ).fetchone()
             rep = con.execute(
-                "SELECT body, snippet FROM replies WHERE id = ?", (reply_id,),
+                "SELECT body, snippet FROM ln_replies WHERE id = ?", (reply_id,),
             ).fetchone()
             # Same style exemplars the on-demand drafter uses, so the
             # background auto-draft also benefits from the learned voice.
@@ -1535,7 +1535,7 @@ def _auto_draft_for_reply(reply_id: int, lead_id: int) -> None:
         now = dt.datetime.now().isoformat(timespec="seconds")
         with connect() as con:
             con.execute(
-                "UPDATE replies SET auto_draft_body = ?, auto_draft_at = ? "
+                "UPDATE ln_replies SET auto_draft_body = ?, auto_draft_at = ? "
                 "WHERE id = ?",
                 (draft, now, reply_id),
             )
@@ -1551,7 +1551,7 @@ def _poll_and_store() -> dict:
     against sent leads, update lead status on replies/bounces. Returns counts."""
     with connect() as con:
         accounts = con.execute(
-            "SELECT id, imap_uid_seen FROM gmail_accounts "
+            "SELECT id, imap_uid_seen FROM ln_gmail_accounts "
             "WHERE status = 'active' ORDER BY id ASC"
         ).fetchall()
 
@@ -1595,7 +1595,7 @@ def _poll_and_store() -> dict:
             # double-trigger, etc). Identical (lead, from, subject, body)
             # is treated as the same reply.
             if con.execute(
-                "SELECT 1 FROM replies WHERE lead_id = ? AND from_email = ? "
+                "SELECT 1 FROM ln_replies WHERE lead_id = ? AND from_email = ? "
                 "AND subject = ? AND body = ? LIMIT 1",
                 (lead_id, m.from_email or "", m.subject or "", m.body or ""),
             ).fetchone():
@@ -1605,7 +1605,7 @@ def _poll_and_store() -> dict:
             sentiment = linkedin_claude.classify_sentiment(classify_text) if m.kind == "reply" else None
             intent = linkedin_claude.classify_intent(classify_text) if m.kind == "reply" else None
             cur = con.execute(
-                "INSERT OR IGNORE INTO replies "
+                "INSERT OR IGNORE INTO ln_replies "
                 "(lead_id, gmail_msg_id, from_email, subject, snippet, body, "
                 "received_at, kind, sentiment, intent) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -1619,7 +1619,7 @@ def _poll_and_store() -> dict:
             if m.kind == "reply":
                 counts["replies"] += 1
                 con.execute(
-                    "UPDATE leads SET status = 'Replied', replied_at = ?, "
+                    "UPDATE ln_leads SET status = 'Replied', replied_at = ?, "
                     "needs_attention = 1 WHERE id = ? AND status != 'Replied'",
                     (m.received_at, lead_id),
                 )
@@ -1632,12 +1632,12 @@ def _poll_and_store() -> dict:
                 if sentiment == "not_interested" and m.from_email:
                     sender = m.from_email.strip().lower()
                     existing = con.execute(
-                        "SELECT 1 FROM blocklist WHERE kind='email' AND value=?",
+                        "SELECT 1 FROM ln_blocklist WHERE kind='email' AND value=?",
                         (sender,),
                     ).fetchone()
                     if not existing:
                         con.execute(
-                            "INSERT INTO blocklist (kind, value, reason, created_at) "
+                            "INSERT INTO ln_blocklist (kind, value, reason, created_at) "
                             "VALUES ('email', ?, 'auto:reply opt-out', ?)",
                             (sender, dt.datetime.now().isoformat(timespec="seconds")),
                         )
@@ -1657,7 +1657,7 @@ def _poll_and_store() -> dict:
                 if sentiment == "ooo":
                     existing = con.execute(
                         "SELECT ooo_nudge_at, ooo_nudge_sent_at "
-                        "FROM leads WHERE id = ?", (lead_id,),
+                        "FROM ln_leads WHERE id = ?", (lead_id,),
                     ).fetchone()
                     if existing and not existing["ooo_nudge_at"] and not existing["ooo_nudge_sent_at"]:
                         nudge_when = dt.datetime.now().astimezone() + dt.timedelta(days=7)
@@ -1665,7 +1665,7 @@ def _poll_and_store() -> dict:
                             hour=9, minute=0, second=0, microsecond=0,
                         )
                         con.execute(
-                            "UPDATE leads SET ooo_nudge_at = ? WHERE id = ?",
+                            "UPDATE ln_leads SET ooo_nudge_at = ? WHERE id = ?",
                             (nudge_when.isoformat(timespec="seconds"), lead_id),
                         )
                         _log_event(con, "ooo_nudge_scheduled", lead_id=lead_id,
@@ -1679,7 +1679,7 @@ def _poll_and_store() -> dict:
                 # informative and downstream filters (/followups,
                 # replied_at timestamp) depend on it.
                 con.execute(
-                    "UPDATE leads SET status = 'Bounced', bounced_at = ? "
+                    "UPDATE ln_leads SET status = 'Bounced', bounced_at = ? "
                     "WHERE id = ? AND status NOT IN ('Replied', 'Bounced')",
                     (m.received_at, lead_id),
                 )
@@ -1687,7 +1687,7 @@ def _poll_and_store() -> dict:
                 # auto-pause rail can trip if one inbox is landing
                 # disproportionate bounces.
                 acct_row = con.execute(
-                    "SELECT sent_via_account_id, email FROM leads WHERE id = ?",
+                    "SELECT sent_via_account_id, email FROM ln_leads WHERE id = ?",
                     (lead_id,),
                 ).fetchone()
                 if acct_row and acct_row["sent_via_account_id"]:
@@ -1706,7 +1706,7 @@ def _poll_and_store() -> dict:
                 domain = recipient.split("@", 1)[1] if "@" in recipient else ""
                 if domain:
                     bounces_for_domain = con.execute(
-                        "SELECT COUNT(*) FROM leads "
+                        "SELECT COUNT(*) FROM ln_leads "
                         "WHERE LOWER(SUBSTR(email, INSTR(email, '@') + 1)) = ? "
                         "  AND bounced_at IS NOT NULL "
                         "  AND DATE(bounced_at) >= DATE('now', '-30 day')",
@@ -1714,12 +1714,12 @@ def _poll_and_store() -> dict:
                     ).fetchone()[0]
                     if bounces_for_domain >= 2:
                         existing = con.execute(
-                            "SELECT 1 FROM blocklist WHERE kind='domain' AND value=?",
+                            "SELECT 1 FROM ln_blocklist WHERE kind='domain' AND value=?",
                             (domain,),
                         ).fetchone()
                         if not existing:
                             con.execute(
-                                "INSERT INTO blocklist (kind, value, reason, created_at) "
+                                "INSERT INTO ln_blocklist (kind, value, reason, created_at) "
                                 "VALUES ('domain', ?, 'auto:repeat-bounces', ?)",
                                 (domain, dt.datetime.now().isoformat(timespec="seconds")),
                             )
@@ -1739,7 +1739,7 @@ def _poll_and_store() -> dict:
         for acc_id, uid in per_account_new_uid.items():
             if uid > per_account_since.get(acc_id, 0):
                 con.execute(
-                    "UPDATE gmail_accounts SET imap_uid_seen = ? WHERE id = ?",
+                    "UPDATE ln_gmail_accounts SET imap_uid_seen = ? WHERE id = ?",
                     (uid, acc_id),
                 )
         con.commit()

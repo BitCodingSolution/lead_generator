@@ -34,13 +34,18 @@ config.set_main_option(
 # When init() calls upgrade() programmatically, the app's loggers are
 # already configured and fileConfig would clobber them.
 if config.config_file_name is not None and not config.attributes.get("skip_logging"):
-    fileConfig(config.config_file_name)
+    # `disable_existing_loggers=False` keeps uvicorn / FastAPI loggers alive
+    # if env.py is loaded inside a running web process. Belt-and-braces with
+    # the `skip_logging` attribute that linkedin_db.init() sets at boot.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 # -- Import all models so Alembic sees their tables -------------------------
 # app.linkedin.db.Base is the declarative_base() that every model inherits from.
 from app.linkedin.db import Base  # noqa: E402
-# Side-effect import: registers the dashboard_users table on Base.metadata.
+# Side-effect imports: register downstream models on Base.metadata.
 from app.auth import users as _auth_users  # noqa: E402, F401
+from app.marcel import models as _marcel_models  # noqa: E402, F401
+from app.yc import models as _yc_models  # noqa: E402, F401
 
 target_metadata = Base.metadata
 

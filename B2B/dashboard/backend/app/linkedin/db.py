@@ -2,13 +2,16 @@
 LinkedIn source — SQLAlchemy models + helpers (PostgreSQL).
 
 Public surface:
-    DATA_DIR           — filesystem path for ancillary files (CVs, fernet key)
     connect()          — context-managed connection with dict-row access
     get_engine()       — lazily-created SQLAlchemy engine
     SessionLocal       — scoped session factory
     Base               — declarative base (all models inherit from this)
     init()             — idempotent schema bootstrap
     ensure_safety_row()— seed the singleton safety_state row
+
+Filesystem locations for ancillary files now live with their consumers:
+    CV PDFs        → app/linkedin/extras.py: CV_STORAGE_DIR (app/static/cvs/)
+    Fernet key     → app/linkedin/services/gmail.py: _KEY_FILE (app/.fernet.key)
 """
 from __future__ import annotations
 
@@ -31,18 +34,6 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
-
-# ---------------------------------------------------------------------------
-# Filesystem root for ancillary files (CVs, fernet key, etc.)
-# Consumers import this instead of DB_PATH for file-based lookups.
-# ---------------------------------------------------------------------------
-BASE = Path(r"../B2B")
-DATA_DIR = BASE / "Database" / "LinkedIn Data"
-
-# Backward-compat alias — some consumers import DB_PATH for its .parent
-# to locate the fernet key or CV storage directory.  Points at the same
-# directory as DATA_DIR; no longer references an actual .db file.
-DB_PATH = DATA_DIR / "leads.db"
 
 # ---------------------------------------------------------------------------
 # SQLAlchemy setup
@@ -103,13 +94,13 @@ SessionLocal = sessionmaker(bind=None)  # bind set in init()
 # Map table name → conflict target columns for INSERT OR REPLACE rewriting.
 # Only tables that actually use INSERT OR REPLACE/IGNORE need entries here.
 _CONFLICT_KEYS: dict[str, list[str]] = {
-    "recyclebin": ["post_url"],
-    "archived_urls": ["post_url"],
-    "autopilot_runs": ["fired_date"],
-    "replies": ["gmail_msg_id"],
-    "kv_settings": ["key"],
-    "company_enrichment": ["company"],
-    "blocklist": ["kind", "value"],
+    "ln_recyclebin": ["post_url"],
+    "ln_archived_urls": ["post_url"],
+    "ln_autopilot_runs": ["fired_date"],
+    "ln_replies": ["gmail_msg_id"],
+    "ln_kv_settings": ["key"],
+    "ln_company_enrichment": ["company"],
+    "ln_blocklist": ["kind", "value"],
 }
 
 # INSERT OR REPLACE pattern
@@ -416,7 +407,7 @@ class PgConnectionFixed(PgConnection):
 # ---------------------------------------------------------------------------
 
 class Lead(Base):
-    __tablename__ = "leads"
+    __tablename__ = "ln_leads"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     post_url = Column(Text, unique=True, nullable=False)
@@ -486,7 +477,7 @@ class Lead(Base):
 
 
 class RecycleBin(Base):
-    __tablename__ = "recyclebin"
+    __tablename__ = "ln_recyclebin"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     original_id = Column(Integer)
@@ -499,7 +490,7 @@ class RecycleBin(Base):
 class ArchivedUrl(Base):
     """Permanent dedup shadow."""
 
-    __tablename__ = "archived_urls"
+    __tablename__ = "ln_archived_urls"
 
     post_url = Column(Text, primary_key=True)
     reason = Column(Text)
@@ -507,7 +498,7 @@ class ArchivedUrl(Base):
 
 
 class SafetyState(Base):
-    __tablename__ = "safety_state"
+    __tablename__ = "ln_safety_state"
 
     id = Column(Integer, primary_key=True)
     daily_sent_count = Column(Integer, nullable=False, server_default="0")
@@ -532,10 +523,10 @@ class SafetyState(Base):
 
 
 class Reply(Base):
-    __tablename__ = "replies"
+    __tablename__ = "ln_replies"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    lead_id = Column(Integer, ForeignKey("leads.id"), nullable=False)
+    lead_id = Column(Integer, ForeignKey("ln_leads.id"), nullable=False)
     gmail_msg_id = Column(Text, unique=True, nullable=False)
     gmail_thread_id = Column(Text)
     from_email = Column(Text)
@@ -560,7 +551,7 @@ class Reply(Base):
 class GmailAccount(Base):
     """Multi-account Gmail rotation."""
 
-    __tablename__ = "gmail_accounts"
+    __tablename__ = "ln_gmail_accounts"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     email = Column(Text, nullable=False, unique=True)
@@ -586,7 +577,7 @@ class GmailAccount(Base):
 
 
 class ExtensionKey(Base):
-    __tablename__ = "extension_keys"
+    __tablename__ = "ln_extension_keys"
 
     key = Column(Text, primary_key=True)
     label = Column(Text)
@@ -595,7 +586,7 @@ class ExtensionKey(Base):
 
 
 class Event(Base):
-    __tablename__ = "events"
+    __tablename__ = "ln_events"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     at = Column(Text, nullable=False)
@@ -611,7 +602,7 @@ class Event(Base):
 class BlocklistEntry(Base):
     """Blocklist: suppress ingest + send for matching companies / domains."""
 
-    __tablename__ = "blocklist"
+    __tablename__ = "ln_blocklist"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     kind = Column(Text, nullable=False)
@@ -627,7 +618,7 @@ class BlocklistEntry(Base):
 class CV(Base):
     """CV library: uploaded PDFs auto-picked by cv_cluster at send time."""
 
-    __tablename__ = "cvs"
+    __tablename__ = "ln_cvs"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     cluster = Column(Text, nullable=False, unique=True)
@@ -640,10 +631,10 @@ class CV(Base):
 class Followup(Base):
     """Follow-ups: tracks which leads have been followed up and when."""
 
-    __tablename__ = "followups"
+    __tablename__ = "ln_followups"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    lead_id = Column(Integer, ForeignKey("leads.id"), nullable=False)
+    lead_id = Column(Integer, ForeignKey("ln_leads.id"), nullable=False)
     sequence = Column(Integer, nullable=False)
     message_id = Column(Text)
     sent_at = Column(Text, nullable=False)
@@ -658,7 +649,7 @@ class Followup(Base):
 class CompanyEnrichment(Base):
     """Per-company enrichment cache."""
 
-    __tablename__ = "company_enrichment"
+    __tablename__ = "ln_company_enrichment"
 
     company = Column(Text, primary_key=True)
     summary = Column(Text)
@@ -669,7 +660,7 @@ class CompanyEnrichment(Base):
 class AutopilotRun(Base):
     """Autopilot state (tracked per-day for visibility)."""
 
-    __tablename__ = "autopilot_runs"
+    __tablename__ = "ln_autopilot_runs"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     fired_at = Column(Text, nullable=False)
@@ -681,7 +672,7 @@ class AutopilotRun(Base):
 class KVSetting(Base):
     """Generic key/value runtime settings."""
 
-    __tablename__ = "kv_settings"
+    __tablename__ = "ln_kv_settings"
 
     key = Column(Text, primary_key=True)
     value = Column(Text, nullable=False)
@@ -691,10 +682,10 @@ class KVSetting(Base):
 class EmailOpen(Base):
     """Individual open events (one row per open — pixel fetch)."""
 
-    __tablename__ = "email_opens"
+    __tablename__ = "ln_email_opens"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    lead_id = Column(Integer, ForeignKey("leads.id"), nullable=False)
+    lead_id = Column(Integer, ForeignKey("ln_leads.id"), nullable=False)
     opened_at = Column(Text, nullable=False)
     user_agent = Column(Text)
     ip = Column(Text)
@@ -717,7 +708,7 @@ def connect() -> Iterator[PgConnectionFixed]:
     Usage is identical to the old sqlite3 pattern::
 
         with connect() as con:
-            row = con.execute("SELECT * FROM leads WHERE id = ?", (42,)).fetchone()
+            row = con.execute("SELECT * FROM ln_leads WHERE id = ?", (42,)).fetchone()
             print(row["company"])
             con.commit()
     """
@@ -740,7 +731,6 @@ def init() -> None:
     all schema changes are tracked by Alembic migration scripts.
     Idempotent — safe to call on every app boot.
     """
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
     eng = get_engine()
     SessionLocal.configure(bind=eng)
 
@@ -754,6 +744,11 @@ def init() -> None:
     alembic_cfg = AlembicConfig(
         str(_BACKEND_ROOT / "alembic.ini")
     )
+    # Tell migrations/env.py to skip its `fileConfig(...)` call. Otherwise
+    # alembic.ini's logger config (root=WARNING + disable_existing_loggers=True)
+    # silently clobbers uvicorn's `uvicorn.access` logger and per-request
+    # access lines stop reaching the console.
+    alembic_cfg.attributes["skip_logging"] = True
     # Override the script_location to be absolute so it works regardless
     # of the cwd when the app is launched.
     alembic_cfg.set_main_option(
@@ -783,7 +778,7 @@ def get_setting_raw(key: str) -> Optional[str]:
     """Return the raw stored string for `key`, or None if not set."""
     with connect() as con:
         r = con.execute(
-            "SELECT value FROM kv_settings WHERE key = ?", (key,),
+            "SELECT value FROM ln_kv_settings WHERE key = ?", (key,),
         ).fetchone()
     return r["value"] if r else None
 
@@ -792,7 +787,7 @@ def set_setting_raw(key: str, value: str) -> None:
     """Upsert a raw string value."""
     with connect() as con:
         con.execute(
-            "INSERT INTO kv_settings (key, value, updated_at) "
+            "INSERT INTO ln_kv_settings (key, value, updated_at) "
             "VALUES (?, ?, ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value, "
             "  updated_at = excluded.updated_at",
@@ -826,10 +821,10 @@ def get_setting_int(key: str, env_key: Optional[str] = None,
 
 
 def ensure_safety_row(con) -> None:
-    row = con.execute("SELECT 1 FROM safety_state WHERE id = 1").fetchone()
+    row = con.execute("SELECT 1 FROM ln_safety_state WHERE id = 1").fetchone()
     if row is None:
         con.execute(
-            "INSERT INTO safety_state (id, daily_sent_date) VALUES (?, ?)",
+            "INSERT INTO ln_safety_state (id, daily_sent_date) VALUES (?, ?)",
             (1, dt.date.today().isoformat()),
         )
 

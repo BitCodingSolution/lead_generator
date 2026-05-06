@@ -4,29 +4,28 @@ campaign (chain), export-batch, reset-all, last-run, resume, auto-run.
 from __future__ import annotations
 
 import datetime as dt
-import sqlite3
 import subprocess
 
 from fastapi import APIRouter, HTTPException
 
 from app.config import settings
-from app.schemas.sources import (
+from app.marcel.schemas.sources import (
     AutoRunReq,
     CampaignReq,
     ExportBatchReq,
     SourceActionReq,
 )
-from app.services.batch_export import export_batch_core
-from app.services.jobs import (
+from app.marcel.services.batch_export import export_batch_core
+from app.marcel.services.jobs import (
     JOBS,
     LAST_RUNS,
     parse_progress,
     start_chain_job,
     start_job,
 )
-from app.services.schedules import load_schedules, save_schedules
-from app.services.scrape_args import schema_flag_args
-from app.services.sources import get_source
+from app.marcel.services.schedules import load_schedules, save_schedules
+from app.marcel.services.scrape_args import schema_flag_args
+from app.marcel.services.sources import get_source
 
 router = APIRouter(prefix="/api/sources", tags=["source-actions"])
 
@@ -217,45 +216,41 @@ def source_export_batch(source_id: str, req: ExportBatchReq) -> dict:
 
 @router.post("/{source_id}/reset-all")
 def source_reset_all(source_id: str) -> dict:
-    """Destructive: wipes this source's DB rows, raw dumps, logs, and batches."""
+    """Destructive: wipes this source's Postgres rows, raw dumps, logs, batches."""
     s = get_source(source_id)
     if s.type != "grab":
         raise HTTPException(400, "Reset is only for grab-type sources")
 
     removed = {"db_rows": 0, "raw_files": 0, "logs": 0, "batches": 0}
 
-    if s.db_path.exists():
+    # FK order: exported_leads → founders → leads. TRUNCATE … RESTART
+    # IDENTITY zeroes the autoincrement sequences too — replaces the
+    # legacy DELETE FROM sqlite_sequence dance.
+    from app.linkedin.db import connect as _pg_connect  # local: avoid cycle
+    tables_in_fk_order = [
+        s.exported_table, s.founders_table, s.leads_table,
+    ]
+    tables_in_fk_order = [t for t in tables_in_fk_order if t]
+    if tables_in_fk_order:
         try:
-            c = sqlite3.connect(str(s.db_path))
-            try:
-                tables = ("exported_leads", "founders", "leads")  # FK order
+            with _pg_connect() as con:
+                # Count first so the response can report how much was wiped.
                 total = 0
-                for t in tables:
-                    exists = c.execute(
-                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
-                        (t,),
-                    ).fetchone()
-                    if exists:
-                        cur = c.execute(f"DELETE FROM {t}")
-                        total += cur.rowcount or 0
-                try:
-                    c.execute("DELETE FROM sqlite_sequence")
-                except sqlite3.OperationalError:
-                    pass
-                c.commit()
+                for t in tables_in_fk_order:
+                    n = con.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+                    total += int(n or 0)
+                con.execute(
+                    f"TRUNCATE {', '.join(tables_in_fk_order)} "
+                    f"RESTART IDENTITY CASCADE"
+                )
+                con.commit()
                 removed["db_rows"] = total
-            finally:
-                c.close()
-            try:
-                c2 = sqlite3.connect(str(s.db_path))
-                c2.execute("VACUUM")
-                c2.close()
-            except Exception:
-                pass
         except Exception as e:
             raise HTTPException(500, f"Could not wipe DB: {e}")
 
-    raw_dir = s.db_path.parent / "raw"
+    # Raw dumps + per-source logs still live on disk under grab_leads/.
+    src_dir = settings.grab_root / "sources" / source_id
+    raw_dir = src_dir / "raw"
     if raw_dir.exists():
         for f in raw_dir.glob("*.json"):
             try:

@@ -87,14 +87,14 @@ def list_leads(
         # column, runs once per /leads fetch instead of needing a cron.
         now_iso = dt.datetime.now().isoformat(timespec="seconds")
         con.execute(
-            "UPDATE leads SET needs_attention = 1, remind_at = NULL "
+            "UPDATE ln_leads SET needs_attention = 1, remind_at = NULL "
             "WHERE remind_at IS NOT NULL AND remind_at <= ?",
             (now_iso,),
         )
         con.commit()
 
         total = con.execute(
-            f"SELECT COUNT(*) FROM leads {where}", tuple(params)
+            f"SELECT COUNT(*) FROM ln_leads {where}", tuple(params)
         ).fetchone()[0]
         rows = con.execute(
             f"SELECT id, post_url, posted_by, company, role, tech_stack, location, "
@@ -103,7 +103,7 @@ def list_leads(
             f"jaydip_note, open_count, first_opened_at, last_opened_at, "
             f"scheduled_send_at, ooo_nudge_at, ooo_nudge_sent_at, "
             f"fit_score, fit_score_reasons, remind_at "
-            f"FROM leads {where} {order_sql} LIMIT ? OFFSET ?",
+            f"FROM ln_leads {where} {order_sql} LIMIT ? OFFSET ?",
             tuple(params) + (limit, offset),
         ).fetchall()
         # Compute which CV clusters are currently uploaded so the UI can
@@ -111,7 +111,7 @@ def list_leads(
         # clicks Send (which would 400 on cv_required_but_missing). One
         # roundtrip covers the whole page.
         present_clusters = {
-            r[0] for r in con.execute("SELECT cluster FROM cvs").fetchall()
+            r[0] for r in con.execute("SELECT cluster FROM ln_cvs").fetchall()
         }
 
         # Recruiter-spam signal: same posted_by name appearing across
@@ -123,7 +123,7 @@ def list_leads(
             r["posted_by"]
             for r in con.execute(
                 "SELECT posted_by, COUNT(DISTINCT company) AS n_companies "
-                "FROM leads "
+                "FROM ln_leads "
                 "WHERE posted_by IS NOT NULL AND TRIM(posted_by) != '' "
                 "  AND DATE(first_seen_at) >= ? "
                 "GROUP BY posted_by HAVING COUNT(DISTINCT company) >= 3",
@@ -206,7 +206,7 @@ def export_leads_csv(
         buf.seek(0); buf.truncate(0)
         with connect() as con:
             for r in con.execute(
-                f"SELECT {', '.join(cols)} FROM leads {where} "
+                f"SELECT {', '.join(cols)} FROM ln_leads {where} "
                 f"ORDER BY first_seen_at DESC, id DESC",
                 tuple(params),
             ):
@@ -232,7 +232,7 @@ def rescore_all_leads():
     after adjusting weights or on first-time upgrade from a pre-scoring
     install. Scales to ~thousands in <1s."""
     with connect() as con:
-        ids = [r["id"] for r in con.execute("SELECT id FROM leads").fetchall()]
+        ids = [r["id"] for r in con.execute("SELECT id FROM ln_leads").fetchall()]
         for lead_id in ids:
             _rescore(con, lead_id)
         con.commit()
@@ -242,7 +242,7 @@ def rescore_all_leads():
 @router.get("/leads/{lead_id:int}")
 def get_lead(lead_id: int):
     with connect() as con:
-        r = con.execute("SELECT * FROM leads WHERE id = ?", (lead_id,)).fetchone()
+        r = con.execute("SELECT * FROM ln_leads WHERE id = ?", (lead_id,)).fetchone()
         if r is None:
             raise HTTPException(404, "Lead not found")
         return dict(r)
@@ -288,7 +288,7 @@ def patch_lead(lead_id: int, patch: LeadPatch):
     auto_replied = False
     with connect() as con:
         row = con.execute(
-            "SELECT id, reviewed_at, status, replied_at FROM leads WHERE id = ?",
+            "SELECT id, reviewed_at, status, replied_at FROM ln_leads WHERE id = ?",
             (lead_id,),
         ).fetchone()
         if row is None:
@@ -308,7 +308,7 @@ def patch_lead(lead_id: int, patch: LeadPatch):
             auto_replied = True
 
         sets = ", ".join(f"{k} = ?" for k in updates)
-        con.execute(f"UPDATE leads SET {sets} WHERE id = ?", [*updates.values(), lead_id])
+        con.execute(f"UPDATE ln_leads SET {sets} WHERE id = ?", [*updates.values(), lead_id])
         if auto_replied:
             _log_event(con, "manual_reply", lead_id=lead_id,
                        meta={"source": "call_status_or_note",
@@ -317,7 +317,7 @@ def patch_lead(lead_id: int, patch: LeadPatch):
         # If a draft was edited, ensure status reflects Drafted at minimum.
         if "gen_subject" in updates or "gen_body" in updates:
             con.execute(
-                "UPDATE leads SET status = 'Drafted' "
+                "UPDATE ln_leads SET status = 'Drafted' "
                 "WHERE id = ? AND status IN ('New', 'Skipped')",
                 (lead_id,),
             )
@@ -386,7 +386,7 @@ def bulk_snooze_leads(payload: BulkSnoozeBody):
     with connect() as con:
         placeholders = ",".join("?" * len(payload.ids))
         cur = con.execute(
-            f"UPDATE leads SET remind_at = ?, needs_attention = 0 "
+            f"UPDATE ln_leads SET remind_at = ?, needs_attention = 0 "
             f"WHERE id IN ({placeholders})",
             (when, *payload.ids),
         )
@@ -398,10 +398,10 @@ def bulk_snooze_leads(payload: BulkSnoozeBody):
 
 @router.post("/leads/{lead_id}/restore")
 def restore_lead(lead_id: int):
-    """Restore from recyclebin. `lead_id` here is the recyclebin row id."""
+    """Restore from ln_recyclebin. `lead_id` here is the recyclebin row id."""
     with connect() as con:
         r = con.execute(
-            "SELECT * FROM recyclebin WHERE id = ?", (lead_id,)
+            "SELECT * FROM ln_recyclebin WHERE id = ?", (lead_id,)
         ).fetchone()
         if r is None:
             raise HTTPException(404, "Recyclebin row not found")
@@ -417,17 +417,17 @@ def restore_lead(lead_id: int):
         placeholders = ", ".join(["?"] * len(cols))
         values = [data.get(c) for c in cols]
         con.execute(
-            f"INSERT INTO leads ({', '.join(cols)}) VALUES ({placeholders})",
+            f"INSERT INTO ln_leads ({', '.join(cols)}) VALUES ({placeholders})",
             values,
         )
         new_id = con.execute("SELECT last_insert_rowid()").fetchone()[0]
-        con.execute("DELETE FROM recyclebin WHERE id = ?", (lead_id,))
+        con.execute("DELETE FROM ln_recyclebin WHERE id = ?", (lead_id,))
         # If this post_url was previously "cleared" to the shadow table,
         # drop that entry too — the user has changed their mind.
         post_url = data.get("post_url")
         if post_url:
             con.execute(
-                "DELETE FROM archived_urls WHERE post_url = ?", (post_url,)
+                "DELETE FROM ln_archived_urls WHERE post_url = ?", (post_url,)
             )
         _log_event(con, "restore", lead_id=new_id)
         con.commit()
@@ -439,7 +439,7 @@ def list_recyclebin(limit: int = 200):
     with connect() as con:
         rows = con.execute(
             "SELECT id, original_id, post_url, reason, moved_at, payload_json "
-            "FROM recyclebin ORDER BY moved_at DESC LIMIT ?",
+            "FROM ln_recyclebin ORDER BY moved_at DESC LIMIT ?",
             (limit,),
         ).fetchall()
         out = []
@@ -473,7 +473,7 @@ def schedule_send(lead_id: int, payload: ScheduleBody):
     when = parsed.isoformat(timespec="seconds")
     with connect() as con:
         row = con.execute(
-            "SELECT id, email, status FROM leads WHERE id = ?", (lead_id,),
+            "SELECT id, email, status FROM ln_leads WHERE id = ?", (lead_id,),
         ).fetchone()
         if row is None:
             raise HTTPException(404, "Lead not found")
@@ -484,7 +484,7 @@ def schedule_send(lead_id: int, payload: ScheduleBody):
                 400, f"Cannot schedule a lead in status '{row['status']}'"
             )
         con.execute(
-            "UPDATE leads SET scheduled_send_at = ?, "
+            "UPDATE ln_leads SET scheduled_send_at = ?, "
             "status = CASE WHEN status = 'New' THEN 'Drafted' ELSE status END "
             "WHERE id = ?",
             (when, lead_id),
@@ -499,7 +499,7 @@ def schedule_send(lead_id: int, payload: ScheduleBody):
 def unschedule_send(lead_id: int):
     with connect() as con:
         cur = con.execute(
-            "UPDATE leads SET scheduled_send_at = NULL "
+            "UPDATE ln_leads SET scheduled_send_at = NULL "
             "WHERE id = ? AND scheduled_send_at IS NOT NULL",
             (lead_id,),
         )
@@ -537,12 +537,12 @@ def snooze_lead(lead_id: int, payload: SnoozeBody):
     when = parsed.isoformat(timespec="seconds")
     with connect() as con:
         row = con.execute(
-            "SELECT id FROM leads WHERE id = ?", (lead_id,),
+            "SELECT id FROM ln_leads WHERE id = ?", (lead_id,),
         ).fetchone()
         if row is None:
             raise HTTPException(404, "Lead not found")
         con.execute(
-            "UPDATE leads SET remind_at = ?, needs_attention = 0 WHERE id = ?",
+            "UPDATE ln_leads SET remind_at = ?, needs_attention = 0 WHERE id = ?",
             (when, lead_id),
         )
         _log_event(con, "snoozed", lead_id=lead_id, meta={"remind_at": when})
@@ -554,7 +554,7 @@ def snooze_lead(lead_id: int, payload: SnoozeBody):
 def unsnooze_lead(lead_id: int):
     with connect() as con:
         cur = con.execute(
-            "UPDATE leads SET remind_at = NULL, needs_attention = 1 "
+            "UPDATE ln_leads SET remind_at = NULL, needs_attention = 1 "
             "WHERE id = ? AND remind_at IS NOT NULL",
             (lead_id,),
         )

@@ -6,15 +6,15 @@ import datetime as dt
 from fastapi import APIRouter, HTTPException
 
 from app.config import settings
-from app.db import conn
-from app.schemas.sources import SendBatchReq
-from app.services.batch_export import (
+from app.marcel.db import conn
+from app.marcel.schemas.sources import SendBatchReq
+from app.marcel.services.batch_export import (
     batch_status,
     resolve_grab_batch,
     resolve_marcel_batch,
 )
-from app.services.jobs import start_job
-from app.services.sources import all_sources, get_source
+from app.marcel.services.jobs import start_job
+from app.marcel.services.sources import all_sources, get_source
 
 router = APIRouter(prefix="/api", tags=["batches"])
 
@@ -134,7 +134,7 @@ def batch_delete(source_id: str, name: str) -> dict:
 @router.get("/batches")
 def batches(limit: int = 20) -> list[dict]:
     """Marcel daily batches summary from the daily_batches table."""
-    from app.db import q_all
+    from app.marcel.db import q_all
     return q_all(
         "SELECT * FROM daily_batches ORDER BY batch_date DESC LIMIT ?", limit
     )

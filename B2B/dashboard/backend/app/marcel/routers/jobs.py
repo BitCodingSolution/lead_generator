@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
 
-from app.services.jobs import JOBS, request_stop
+from app.marcel.services.jobs import JOBS, request_stop
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 

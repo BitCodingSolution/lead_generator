@@ -19,7 +19,17 @@ from fastapi import HTTPException
 class Source:
     id: str
     label: str
-    db_path: Path
+    # All sources now live in Postgres. Grab-type sources declare which
+    # tables hold their leads / founders / export-tracking rows so the
+    # generic multi-source router can dispatch by Source instead of
+    # hardcoding table names.
+    leads_table: Optional[str] = None        # e.g. "yc_leads"
+    founders_table: Optional[str] = None     # e.g. "yc_founders"
+    exported_table: Optional[str] = None     # e.g. "yc_exported_leads"
+    # `db_path` is kept for backward compat with any external caller
+    # that might still construct a Source manually; nothing in the
+    # backend reads it any more.
+    db_path: Optional[Path] = None
     type: str = "grab"           # 'grab' | 'outreach'
     schema_path: Optional[Path] = None
     icon: str = "Database"

@@ -9,14 +9,14 @@ from __future__ import annotations
 
 import datetime as dt
 import json
-import sqlite3
 from pathlib import Path
 from typing import Iterable
 
 from fastapi import HTTPException
 
 from app.config import settings
-from app.services.sources import get_source
+from app.linkedin.db import connect as _pg_connect
+from app.marcel.services.sources import get_source
 
 
 def title_priority(title: str) -> int:
@@ -58,33 +58,33 @@ def export_batch_core(
     s = get_source(source_id)
     if s.type != "grab":
         raise RuntimeError("Export is only for grab sources")
-    if not s.db_path.exists():
-        raise RuntimeError("Source DB does not exist yet")
+    if not s.leads_table or not s.founders_table:
+        raise RuntimeError(
+            f"Source '{source_id}' has no leads/founders tables configured."
+        )
 
     lead_ids = list(lead_ids) if lead_ids else None
+    leads_t = s.leads_table
+    founders_t = s.founders_table
 
-    c = sqlite3.connect(str(s.db_path))
-    c.row_factory = sqlite3.Row
-    try:
-        where = ["f.email_status='ok'"]
-        params: list = []
-        if lead_ids:
-            placeholders = ",".join("?" * len(lead_ids))
-            where.append(f"l.id IN ({placeholders})")
-            params += lead_ids
-        sql = f"""
-            SELECT l.id as company_id, f.id as founder_id,
-                   l.company_name, l.company_domain, l.location, l.extra_data,
-                   f.full_name, f.title, f.email, f.linkedin_url
-            FROM leads l
-            JOIN founders f ON f.lead_id = l.id
-            WHERE {' AND '.join(where)}
-            ORDER BY l.id, f.id
-            LIMIT ?
-        """
-        rows = c.execute(sql, [*params, int(max_rows)]).fetchall()
-    finally:
-        c.close()
+    where = ["f.email_status = 'ok'"]
+    params: list = []
+    if lead_ids:
+        placeholders = ",".join("?" * len(lead_ids))
+        where.append(f"l.id IN ({placeholders})")
+        params += lead_ids
+    sql = (
+        f"SELECT l.id as company_id, f.id as founder_id, "
+        f"       l.company_name, l.company_domain, l.location, l.extra_data, "
+        f"       f.full_name, f.title, f.email, f.linkedin_url "
+        f"FROM {leads_t} l "
+        f"JOIN {founders_t} f ON f.lead_id = l.id "
+        f"WHERE {' AND '.join(where)} "
+        f"ORDER BY l.id, f.id "
+        f"LIMIT ?"
+    )
+    with _pg_connect() as con:
+        rows = con.execute(sql, (*params, int(max_rows))).fetchall()
 
     if not rows:
         raise RuntimeError("No leads with verified emails match the selection")
@@ -178,31 +178,26 @@ def export_batch_core(
     ) as w:
         df.to_excel(w, sheet_name="Batch", index=False)
 
-    c2 = sqlite3.connect(str(s.db_path))
-    try:
-        c2.executescript("""
-        CREATE TABLE IF NOT EXISTS exported_leads (
-            lead_id INTEGER NOT NULL,
-            founder_id INTEGER,
-            batch_file TEXT,
-            exported_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
-            PRIMARY KEY (lead_id, founder_id)
-        );
-        """)
-        c2.executemany(
-            "INSERT OR IGNORE INTO exported_leads (lead_id, founder_id, batch_file) VALUES (?,?,?)",
-            [(cid, fid, out_path.name) for (cid, fid) in all_exported_members],
-        )
+    exported_t = s.exported_table
+    now_iso = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with _pg_connect() as con:
+        if exported_t:
+            for (cid, fid) in all_exported_members:
+                con.execute(
+                    f"INSERT INTO {exported_t} "
+                    f"(lead_id, founder_id, batch_file, exported_at) "
+                    f"VALUES (?, ?, ?, ?) "
+                    f"ON CONFLICT (lead_id, founder_id) DO NOTHING",
+                    (cid, fid, out_path.name, now_iso),
+                )
         exported_company_ids = {cid for (cid, _fid) in all_exported_members}
         if exported_company_ids:
             ph = ",".join("?" * len(exported_company_ids))
-            c2.execute(
-                f"UPDATE leads SET needs_attention=0 WHERE id IN ({ph})",
-                list(exported_company_ids),
+            con.execute(
+                f"UPDATE {leads_t} SET needs_attention = 0 WHERE id IN ({ph})",
+                tuple(exported_company_ids),
             )
-        c2.commit()
-    finally:
-        c2.close()
+        con.commit()
 
     return {
         "ok": True,

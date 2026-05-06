@@ -6,8 +6,8 @@ import datetime as dt
 from fastapi import APIRouter, HTTPException
 
 from app.config import settings
-from app.db import conn, q_all, q_one
-from app.schemas.actions import (
+from app.marcel.db import conn, q_all, q_one
+from app.marcel.schemas.actions import (
     BatchFileBody,
     FollowupBody,
     PickBody,
@@ -16,9 +16,9 @@ from app.schemas.actions import (
     SendAllDraftsBody,
     SendBody,
 )
-from app.services.batch_export import resolve_marcel_batch
-from app.services.jobs import pipeline_running, start_job
-from app.services.preflight import preflight_report
+from app.marcel.services.batch_export import resolve_marcel_batch
+from app.marcel.services.jobs import pipeline_running, start_job
+from app.marcel.services.preflight import preflight_report
 
 router = APIRouter(prefix="/api", tags=["actions"])
 
@@ -67,7 +67,7 @@ def write_outlook(body: BatchFileBody) -> dict:
 @router.post("/actions/backup-db")
 def backup_db() -> dict:
     argv = [settings.python_executable, str(settings.scripts_dir / "backup_db.py")]
-    return {"job_id": start_job(argv, "Backup leads.db")}
+    return {"job_id": start_job(argv, "Backup Marcel DB")}
 
 
 @router.get("/actions/preflight")

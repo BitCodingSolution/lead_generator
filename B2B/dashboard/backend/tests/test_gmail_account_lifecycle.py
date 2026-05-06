@@ -102,7 +102,7 @@ def _seed_account(con, **overrides) -> int:
     cols = ", ".join(defaults.keys())
     placeholders = ", ".join(["?"] * len(defaults))
     cur = con.execute(
-        f"INSERT INTO gmail_accounts ({cols}) VALUES ({placeholders})",
+        f"INSERT INTO ln_gmail_accounts ({cols}) VALUES ({placeholders})",
         list(defaults.values()),
     )
     con.commit()
@@ -114,7 +114,7 @@ def test_record_send_failure_increments_counter(db):
     paused = gmail.record_send_failure(aid, "smtp timeout")
     assert paused is False
     row = db.execute(
-        "SELECT consecutive_failures, status FROM gmail_accounts WHERE id = ?",
+        "SELECT consecutive_failures, status FROM ln_gmail_accounts WHERE id = ?",
         (aid,),
     ).fetchone()
     assert row["consecutive_failures"] == 1
@@ -128,7 +128,7 @@ def test_record_send_failure_auto_pauses_at_threshold(db):
         assert gmail.record_send_failure(aid, "smtp x") is False
     assert gmail.record_send_failure(aid, "final smtp x") is True
     row = db.execute(
-        "SELECT status, paused_reason FROM gmail_accounts WHERE id = ?",
+        "SELECT status, paused_reason FROM ln_gmail_accounts WHERE id = ?",
         (aid,),
     ).fetchone()
     assert row["status"] == "paused"
@@ -141,7 +141,7 @@ def test_record_bounce_auto_pauses_at_threshold(db):
         assert gmail.record_bounce(aid) is False
     assert gmail.record_bounce(aid) is True
     row = db.execute(
-        "SELECT status, paused_reason, bounce_count_today FROM gmail_accounts WHERE id = ?",
+        "SELECT status, paused_reason, bounce_count_today FROM ln_gmail_accounts WHERE id = ?",
         (aid,),
     ).fetchone()
     assert row["status"] == "paused"
@@ -162,7 +162,7 @@ def test_set_account_status_active_clears_failure_counters(db):
     gmail.set_account_status(aid, "active")
     row = db.execute(
         "SELECT status, consecutive_failures, bounce_count_today, paused_reason "
-        "FROM gmail_accounts WHERE id = ?", (aid,),
+        "FROM ln_gmail_accounts WHERE id = ?", (aid,),
     ).fetchone()
     assert row["status"] == "active"
     assert row["consecutive_failures"] == 0
@@ -182,7 +182,7 @@ def test_roll_if_stale_day_resets_counters(db):
     db.commit()
     row = db.execute(
         "SELECT sent_today, bounce_count_today, sent_date "
-        "FROM gmail_accounts WHERE id = ?", (aid,),
+        "FROM ln_gmail_accounts WHERE id = ?", (aid,),
     ).fetchone()
     assert row["sent_today"] == 0
     assert row["bounce_count_today"] == 0
@@ -196,7 +196,7 @@ def test_roll_if_stale_day_leaves_today_alone(db):
     gmail._roll_if_stale_day(db, today)
     db.commit()
     row = db.execute(
-        "SELECT sent_today, bounce_count_today FROM gmail_accounts WHERE id = ?",
+        "SELECT sent_today, bounce_count_today FROM ln_gmail_accounts WHERE id = ?",
         (aid,),
     ).fetchone()
     assert row["sent_today"] == 15

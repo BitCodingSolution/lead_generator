@@ -15,7 +15,7 @@ router = APIRouter(prefix="/api/linkedin", tags=["linkedin"])
 @router.post("/drafts/{lead_id}/generate")
 def generate_draft(lead_id: int):
     with connect() as con:
-        row = con.execute("SELECT * FROM leads WHERE id = ?", (lead_id,)).fetchone()
+        row = con.execute("SELECT * FROM ln_leads WHERE id = ?", (lead_id,)).fetchone()
         if row is None:
             raise HTTPException(404, "Lead not found")
 
@@ -47,7 +47,7 @@ def generate_draft(lead_id: int):
         # Auto-archive on Claude skip decision.
         if result.should_skip:
             con.execute(
-                "UPDATE leads SET gen_subject = ?, gen_body = ?, email_mode = ?, "
+                "UPDATE ln_leads SET gen_subject = ?, gen_body = ?, email_mode = ?, "
                 "cv_cluster = ?, skip_reason = ?, skip_source = ?, "
                 "status = 'Skipped' WHERE id = ?",
                 (
@@ -70,7 +70,7 @@ def generate_draft(lead_id: int):
         # keep status=New so the next generate attempt re-runs cleanly.
         new_status = "Drafted" if (result.subject or result.body) else "New"
         con.execute(
-            "UPDATE leads SET gen_subject = ?, gen_body = ?, email_mode = ?, "
+            "UPDATE ln_leads SET gen_subject = ?, gen_body = ?, email_mode = ?, "
             "cv_cluster = ?, status = ?, skip_reason = NULL, "
             "skip_source = NULL WHERE id = ?",
             (
@@ -110,7 +110,7 @@ def generate_drafts_batch(payload: DraftBatchIn):
 
         with connect() as con:
             rows = con.execute(
-                "SELECT id FROM leads "
+                "SELECT id FROM ln_leads "
                 "WHERE status = 'New' "
                 "  AND post_text IS NOT NULL AND TRIM(post_text) != '' "
                 "ORDER BY first_seen_at ASC LIMIT ?",

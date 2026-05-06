@@ -37,7 +37,7 @@ def _seed_lead(con, **overrides) -> int:
     cols = ", ".join(defaults.keys())
     placeholders = ", ".join(["?"] * len(defaults))
     cur = con.execute(
-        f"INSERT INTO leads ({cols}) VALUES ({placeholders})",
+        f"INSERT INTO ln_leads ({cols}) VALUES ({placeholders})",
         list(defaults.values()),
     )
     con.commit()

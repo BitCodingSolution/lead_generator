@@ -16,7 +16,7 @@ router = APIRouter(prefix="/api/linkedin", tags=["linkedin"])
 def send_one(lead_id: int):
     with connect() as con:
         lead = con.execute(
-            "SELECT * FROM leads WHERE id = ?", (lead_id,)
+            "SELECT * FROM ln_leads WHERE id = ?", (lead_id,)
         ).fetchone()
         if lead is None:
             raise HTTPException(404, "Lead not found")
@@ -106,7 +106,7 @@ def send_batch(payload: BatchSendIn):
             remaining_quota = max(
                 0,
                 cap - con.execute(
-                    "SELECT daily_sent_count FROM safety_state WHERE id=1"
+                    "SELECT daily_sent_count FROM ln_safety_state WHERE id=1"
                 ).fetchone()[0],
             )
             take = min(payload.count, remaining_quota)

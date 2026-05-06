@@ -17,7 +17,7 @@ def list_blocklist():
     with connect() as con:
         rows = con.execute(
             "SELECT id, kind, value, reason, created_at "
-            "FROM blocklist ORDER BY created_at DESC"
+            "FROM ln_blocklist ORDER BY created_at DESC"
         ).fetchall()
         return {"rows": [dict(r) for r in rows]}
 
@@ -36,7 +36,7 @@ def add_blocklist(payload: BlocklistIn):
     with connect() as con:
         try:
             con.execute(
-                "INSERT INTO blocklist (kind, value, reason, created_at) "
+                "INSERT INTO ln_blocklist (kind, value, reason, created_at) "
                 "VALUES (?, ?, ?, ?)",
                 (payload.kind, value, payload.reason, _now_iso()),
             )
@@ -80,7 +80,7 @@ def bulk_add_blocklist(payload: BlocklistBulkIn):
                 kind, tok = "domain", dom
             try:
                 con.execute(
-                    "INSERT INTO blocklist (kind, value, reason, created_at) "
+                    "INSERT INTO ln_blocklist (kind, value, reason, created_at) "
                     "VALUES (?, ?, ?, ?)",
                     (kind, tok, payload.reason, _now_iso()),
                 )
@@ -111,7 +111,7 @@ def bulk_add_blocklist(payload: BlocklistBulkIn):
 @router.post("/blocklist/{item_id}/delete")
 def del_blocklist(item_id: int):
     with connect() as con:
-        cur = con.execute("DELETE FROM blocklist WHERE id = ?", (item_id,))
+        cur = con.execute("DELETE FROM ln_blocklist WHERE id = ?", (item_id,))
         if cur.rowcount == 0:
             raise HTTPException(404, "Blocklist entry not found")
         _log(con, "blocklist_del", meta={"id": item_id})

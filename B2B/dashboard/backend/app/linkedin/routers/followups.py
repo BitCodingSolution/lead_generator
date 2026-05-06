@@ -16,11 +16,11 @@ router = APIRouter(prefix="/api/linkedin", tags=["linkedin-extras"])
 def autopilot_status():
     with connect() as con:
         s = con.execute(
-            "SELECT autopilot_enabled, autopilot_hour FROM safety_state WHERE id=1"
+            "SELECT autopilot_enabled, autopilot_hour FROM ln_safety_state WHERE id=1"
         ).fetchone()
         last = con.execute(
             "SELECT fired_at, fired_date, total_queued, status "
-            "FROM autopilot_runs ORDER BY fired_at DESC LIMIT 1"
+            "FROM ln_autopilot_runs ORDER BY fired_at DESC LIMIT 1"
         ).fetchone()
     enabled = bool(s and s["autopilot_enabled"])
     hour = int(s["autopilot_hour"]) if s else 10
@@ -57,9 +57,9 @@ def list_due_followups(window_days: int = 14):
             """
             SELECT l.id, l.company, l.posted_by, l.email, l.gen_subject,
                    l.sent_at, l.status,
-                   (SELECT MAX(sent_at) FROM followups f WHERE f.lead_id = l.id) AS last_followup_at,
-                   (SELECT COUNT(*) FROM followups f WHERE f.lead_id = l.id) AS followup_count
-            FROM leads l
+                   (SELECT MAX(sent_at) FROM ln_followups f WHERE f.lead_id = l.id) AS last_followup_at,
+                   (SELECT COUNT(*) FROM ln_followups f WHERE f.lead_id = l.id) AS followup_count
+            FROM ln_leads l
             WHERE l.status = 'Sent'
               AND l.sent_at IS NOT NULL
               AND l.sent_at >= ?
@@ -115,7 +115,7 @@ def run_digest(force: bool = False):
     if not recipient:
         with connect() as con:
             row = con.execute(
-                "SELECT email FROM gmail_accounts WHERE status = 'active' "
+                "SELECT email FROM ln_gmail_accounts WHERE status = 'active' "
                 "ORDER BY id ASC LIMIT 1"
             ).fetchone()
             recipient = row["email"] if row else ""
@@ -130,19 +130,19 @@ def run_digest(force: bool = False):
             row = con.execute(sql, params).fetchone()
             return int(row[0]) if row else 0
         sent_24h = _cnt(
-            "SELECT COUNT(*) FROM leads WHERE DATE(sent_at) >= ?", (yesterday,))
+            "SELECT COUNT(*) FROM ln_leads WHERE DATE(sent_at) >= ?", (yesterday,))
         replied_24h = _cnt(
-            "SELECT COUNT(*) FROM leads WHERE DATE(replied_at) >= ?", (yesterday,))
+            "SELECT COUNT(*) FROM ln_leads WHERE DATE(replied_at) >= ?", (yesterday,))
         bounced_24h = _cnt(
-            "SELECT COUNT(*) FROM leads WHERE DATE(bounced_at) >= ?", (yesterday,))
+            "SELECT COUNT(*) FROM ln_leads WHERE DATE(bounced_at) >= ?", (yesterday,))
         new_24h = _cnt(
-            "SELECT COUNT(*) FROM leads WHERE DATE(first_seen_at) >= ?", (yesterday,))
+            "SELECT COUNT(*) FROM ln_leads WHERE DATE(first_seen_at) >= ?", (yesterday,))
         pending_replies = _cnt(
-            "SELECT COUNT(DISTINCT lead_id) FROM replies "
+            "SELECT COUNT(DISTINCT lead_id) FROM ln_replies "
             "WHERE kind = 'reply' AND handled_at IS NULL")
         top_lead = con.execute(
             "SELECT id, posted_by, company, role, fit_score "
-            "FROM leads WHERE status = 'Drafted' AND email IS NOT NULL "
+            "FROM ln_leads WHERE status = 'Drafted' AND email IS NOT NULL "
             "ORDER BY COALESCE(fit_score, -1) DESC, first_seen_at DESC LIMIT 1"
         ).fetchone()
 
@@ -233,12 +233,12 @@ def run_followups(payload: FollowupRunIn):
         import secrets as _sec
         with connect() as con:
             r = con.execute(
-                "SELECT open_token FROM leads WHERE id = ?", (lead["id"],),
+                "SELECT open_token FROM ln_leads WHERE id = ?", (lead["id"],),
             ).fetchone()
             token = (r["open_token"] if r and r["open_token"] else _sec.token_urlsafe(22))
             if not (r and r["open_token"]):
                 con.execute(
-                    "UPDATE leads SET open_token = ? WHERE id = ?",
+                    "UPDATE ln_leads SET open_token = ? WHERE id = ?",
                     (token, lead["id"]),
                 )
                 con.commit()
@@ -273,7 +273,7 @@ def run_followups(payload: FollowupRunIn):
             )
             with connect() as con:
                 con.execute(
-                    "INSERT INTO followups (lead_id, sequence, message_id, sent_at) "
+                    "INSERT INTO ln_followups (lead_id, sequence, message_id, sent_at) "
                     "VALUES (?, ?, ?, ?)",
                     (lead["id"], seq, result.message_id, result.sent_at),
                 )

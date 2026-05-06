@@ -1,8 +1,7 @@
 """JWT issue/verify for session tokens.
 
 HS256 signing with a secret read from `DASHBOARD_JWT_SECRET` env var, or
-auto-generated and persisted to `<backend>/.jwt_secret` on first boot
-(same pattern as the legacy `.api_key` file).
+auto-generated and persisted to `<backend>/.jwt_secret` on first boot.
 """
 from __future__ import annotations
 

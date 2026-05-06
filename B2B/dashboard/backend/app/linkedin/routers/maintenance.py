@@ -31,7 +31,7 @@ def api_sweep_junk():
     with connect() as con:
         # Collect candidates first so _archive_lead can operate per-row.
         rows = con.execute(
-            "SELECT id FROM leads WHERE ("
+            "SELECT id FROM ln_leads WHERE ("
             "  (status = 'Skipped')"
             "  OR ((email IS NULL OR TRIM(email) = '') "
             "       AND (phone IS NULL OR TRIM(phone) = '') "
@@ -57,12 +57,12 @@ def api_clear_recyclebin():
     now = dt.datetime.now().isoformat(timespec="seconds")
     with connect() as con:
         moved = con.execute(
-            "INSERT OR IGNORE INTO archived_urls (post_url, reason, archived_at) "
-            "SELECT post_url, reason, ? FROM recyclebin "
+            "INSERT OR IGNORE INTO ln_archived_urls (post_url, reason, archived_at) "
+            "SELECT post_url, reason, ? FROM ln_recyclebin "
             "WHERE post_url IS NOT NULL AND post_url != ''",
             (now,),
         ).rowcount
-        cur = con.execute("DELETE FROM recyclebin")
+        cur = con.execute("DELETE FROM ln_recyclebin")
         deleted = cur.rowcount
         _log(con, "recyclebin_cleared", meta={"deleted": deleted, "shadowed": moved})
         con.commit()
@@ -74,9 +74,9 @@ def api_purge_recyclebin():
     """Fully forget. Deletes recyclebin AND archived_urls shadow rows, so
     previously-rejected posts can re-ingest as fresh leads."""
     with connect() as con:
-        cur = con.execute("DELETE FROM recyclebin")
+        cur = con.execute("DELETE FROM ln_recyclebin")
         deleted = cur.rowcount
-        cur2 = con.execute("DELETE FROM archived_urls")
+        cur2 = con.execute("DELETE FROM ln_archived_urls")
         forgotten = cur2.rowcount
         _log(con, "recyclebin_purged",
              meta={"deleted": deleted, "forgotten": forgotten})
@@ -98,7 +98,7 @@ def export_recyclebin():
     with connect() as con:
         rows = con.execute(
             "SELECT id, original_id, post_url, reason, moved_at, payload_json "
-            "FROM recyclebin ORDER BY moved_at DESC"
+            "FROM ln_recyclebin ORDER BY moved_at DESC"
         ).fetchall()
 
     data: list[list] = []

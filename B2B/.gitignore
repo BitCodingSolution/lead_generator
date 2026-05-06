@@ -1,5 +1,6 @@
 # --- Data / PII (never commit) ---
 Database/
+dashboard/backend/app/marcel/data/
 *.db
 *.db-journal
 *.db-shm
@@ -31,6 +32,8 @@ dist/
 api_key.txt
 .jwt_secret
 dashboard/backend/.jwt_secret
+.fernet.key
+dashboard/backend/app/.fernet.key
 
 # Personal profile used by reply drafter to fill screening forms.
 # Contains DOB / mobile / CTC / etc. — never commit.

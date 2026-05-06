@@ -13,11 +13,12 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Repo layout:
-#   /B2B/                         <- BASE
-#       dashboard/backend/app/    <- this file
-#       Database/Marcel Data/...
-#       grab_leads/...
-#       scripts/...
+#   /B2B/                                   <- BASE
+#       dashboard/backend/app/              <- this file
+#           marcel/data/                    <- Marcel pipeline assets
+#           static/                         <- linkedin CV PDFs, etc.
+#       grab_leads/                         <- per-source SQLite scrapers
+#       scripts/
 _BASE_DEFAULT = Path(__file__).resolve().parents[3]
 
 
@@ -60,16 +61,15 @@ class Settings(BaseSettings):
 
     # ---- Derived helpers (not env-driven) ----
     @property
-    def db_path(self) -> Path:
-        return self.base_dir / "Database" / "Marcel Data" / "leads.db"
-
-    @property
     def scripts_dir(self) -> Path:
         return self.base_dir / "scripts"
 
     @property
     def batches_dir(self) -> Path:
-        return self.base_dir / "Database" / "Marcel Data" / "01_Daily_Batches"
+        # Marcel's daily-batch XLSX exports — colocated with the rest of
+        # the marcel module under `app/marcel/data/`. Anchored on
+        # `__file__` so the path resolves identically regardless of cwd.
+        return Path(__file__).resolve().parent / "marcel" / "data" / "01_Daily_Batches"
 
     @property
     def grab_root(self) -> Path:

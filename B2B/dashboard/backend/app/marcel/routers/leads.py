@@ -5,7 +5,7 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException
 
-from app.db import q_all, q_one
+from app.marcel.db import q_all, q_one
 
 router = APIRouter(prefix="/api", tags=["leads"])
 

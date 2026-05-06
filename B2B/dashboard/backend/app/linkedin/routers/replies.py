@@ -34,14 +34,14 @@ def list_lead_replies(lead_id: int):
         lead = con.execute(
             "SELECT id, email, posted_by, company, role, gen_subject, "
             "gen_body, sent_message_id, sent_at, sent_via_account_id "
-            "FROM leads WHERE id = ?", (lead_id,),
+            "FROM ln_leads WHERE id = ?", (lead_id,),
         ).fetchone()
         if lead is None:
             raise HTTPException(404, "Lead not found")
         received_on = None
         if lead["sent_via_account_id"]:
             acct = con.execute(
-                "SELECT email FROM gmail_accounts WHERE id = ?",
+                "SELECT email FROM ln_gmail_accounts WHERE id = ?",
                 (lead["sent_via_account_id"],),
             ).fetchone()
             received_on = acct["email"] if acct else None
@@ -49,13 +49,13 @@ def list_lead_replies(lead_id: int):
             "SELECT id, gmail_msg_id, from_email, subject, snippet, body, "
             "received_at, kind, handled_at, sentiment, intent, "
             "auto_draft_body, auto_draft_at "
-            "FROM replies WHERE lead_id = ? ORDER BY received_at ASC",
+            "FROM ln_replies WHERE lead_id = ? ORDER BY received_at ASC",
             (lead_id,),
         ).fetchall()
         # Outbound replies Jaydip has already sent in-thread — pulled
         # from the events log where send-reply persists `outbound_body`.
         sent_replies = con.execute(
-            "SELECT at, meta_json FROM events "
+            "SELECT at, meta_json FROM ln_events "
             "WHERE lead_id = ? AND kind = 'reply_sent' "
             "ORDER BY at ASC",
             (lead_id,),
@@ -119,12 +119,12 @@ def draft_reply(lead_id: int, payload: Optional[DraftReplyBody] = None):
     with connect() as con:
         lead = con.execute(
             "SELECT id, posted_by, gen_subject, gen_body "
-            "FROM leads WHERE id = ?", (lead_id,),
+            "FROM ln_leads WHERE id = ?", (lead_id,),
         ).fetchone()
         if lead is None:
             raise HTTPException(404, "Lead not found")
         last = con.execute(
-            "SELECT body, snippet FROM replies "
+            "SELECT body, snippet FROM ln_replies "
             "WHERE lead_id = ? AND kind = 'reply' "
             "ORDER BY received_at DESC LIMIT 1",
             (lead_id,),
@@ -155,7 +155,7 @@ def send_reply(lead_id: int, payload: SendReplyBody):
     with connect() as con:
         lead = con.execute(
             "SELECT id, email, gen_subject, sent_message_id, sent_via_account_id "
-            "FROM leads WHERE id = ?", (lead_id,),
+            "FROM ln_leads WHERE id = ?", (lead_id,),
         ).fetchone()
         if lead is None:
             raise HTTPException(404, "Lead not found")
@@ -164,7 +164,7 @@ def send_reply(lead_id: int, payload: SendReplyBody):
         # Pick the latest inbound reply's Gmail message-id so our outbound
         # reply threads directly under it (not just the original outgoing).
         last_in = con.execute(
-            "SELECT gmail_msg_id FROM replies "
+            "SELECT gmail_msg_id FROM ln_replies "
             "WHERE lead_id = ? AND kind = 'reply' "
             "ORDER BY received_at DESC LIMIT 1",
             (lead_id,),
@@ -204,7 +204,7 @@ def send_reply(lead_id: int, payload: SendReplyBody):
         # alongside his outbound body so the drafter can feed past pairs
         # as few-shot examples on future replies.
         last_inbound = con.execute(
-            "SELECT body, snippet FROM replies "
+            "SELECT body, snippet FROM ln_replies "
             "WHERE lead_id = ? AND kind = 'reply' "
             "ORDER BY received_at DESC LIMIT 1",
             (lead_id,),
@@ -215,13 +215,13 @@ def send_reply(lead_id: int, payload: SendReplyBody):
 
         # Mark the last inbound reply as handled.
         con.execute(
-            "UPDATE replies SET handled_at = ? "
+            "UPDATE ln_replies SET handled_at = ? "
             "WHERE lead_id = ? AND kind = 'reply' AND handled_at IS NULL",
             (now, lead_id),
         )
         # Stamp replied_at / needs_attention=0 (user has now actioned it).
         con.execute(
-            "UPDATE leads SET needs_attention = 0 WHERE id = ?", (lead_id,),
+            "UPDATE ln_leads SET needs_attention = 0 WHERE id = ?", (lead_id,),
         )
         _log_event(
             con, "reply_sent", lead_id=lead_id,
@@ -244,7 +244,7 @@ def mark_reply_handled(reply_id: int, payload: MarkHandledBody):
     now = dt.datetime.now().isoformat(timespec="seconds") if payload.handled else None
     with connect() as con:
         cur = con.execute(
-            "UPDATE replies SET handled_at = ? WHERE id = ?",
+            "UPDATE ln_replies SET handled_at = ? WHERE id = ?",
             (now, reply_id),
         )
         if cur.rowcount == 0:
@@ -267,7 +267,7 @@ def bulk_handle_replies(payload: BulkHandleBody):
         if real_ids:
             placeholders = ",".join(["?"] * len(real_ids))
             cur = con.execute(
-                f"UPDATE replies SET handled_at = ? WHERE id IN ({placeholders})",
+                f"UPDATE ln_replies SET handled_at = ? WHERE id IN ({placeholders})",
                 [now] + real_ids,
             )
             affected += cur.rowcount
@@ -277,7 +277,7 @@ def bulk_handle_replies(payload: BulkHandleBody):
             placeholders = ",".join(["?"] * len(manual_lead_ids))
             new_na = 0 if payload.handled else 1
             cur = con.execute(
-                f"UPDATE leads SET needs_attention = ?, reviewed_at = "
+                f"UPDATE ln_leads SET needs_attention = ?, reviewed_at = "
                 f"CASE WHEN ? IS NULL THEN NULL ELSE COALESCE(reviewed_at, ?) END "
                 f"WHERE id IN ({placeholders})",
                 [new_na, now, now] + manual_lead_ids,
@@ -324,7 +324,7 @@ def list_replies(
             f"  r.auto_draft_body, r.auto_draft_at, "
             f"  l.company, l.posted_by, l.role, l.gen_subject, l.status, "
             f"  l.call_status, l.open_count, l.email AS lead_email "
-            f"FROM replies r LEFT JOIN leads l ON l.id = r.lead_id "
+            f"FROM ln_replies r LEFT JOIN ln_leads l ON l.id = r.lead_id "
             f"{where} ORDER BY r.received_at DESC LIMIT ?",
             tuple(params) + (limit,),
         ).fetchall()
@@ -335,7 +335,7 @@ def list_replies(
             # them so Overview counters and Inbox totals reconcile.
             manual_clauses = [
                 "l.status = 'Replied'",
-                "NOT EXISTS (SELECT 1 FROM replies r WHERE r.lead_id = l.id AND r.kind = 'reply')",
+                "NOT EXISTS (SELECT 1 FROM ln_replies r WHERE r.lead_id = l.id AND r.kind = 'reply')",
             ]
             # Sentiment filter for manual rows — derive from call_status.
             call_map = {
@@ -369,7 +369,7 @@ def list_replies(
                 f"  l.replied_at AS received_at, l.call_status, "
                 f"  l.company, l.posted_by, l.role, l.gen_subject, l.status, "
                 f"  l.open_count, l.email AS lead_email, l.reviewed_at "
-                f"FROM leads l WHERE {manual_where} "
+                f"FROM ln_leads l WHERE {manual_where} "
                 f"ORDER BY l.replied_at DESC LIMIT ?",
                 tuple(params_manual) + (limit,),
             ).fetchall()

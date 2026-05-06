@@ -3,8 +3,8 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from app.db import conn
-from app.schemas.replies import HandleReplyBody
+from app.marcel.db import conn
+from app.marcel.schemas.replies import HandleReplyBody
 
 router = APIRouter(prefix="/api/replies", tags=["replies"])
 

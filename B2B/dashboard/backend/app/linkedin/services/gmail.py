@@ -47,23 +47,27 @@ from typing import Optional
 
 from cryptography.fernet import Fernet, InvalidToken
 
-from app.linkedin.db import DB_PATH, connect
+from app.linkedin.db import connect
 
 SMTP_HOST = "smtp.gmail.com"
 SMTP_PORT = 465
 IMAP_HOST = "imap.gmail.com"
 IMAP_PORT = 993
 
-_KEY_FILE = DB_PATH.parent / ".fernet.key"
+# Fernet key for encrypting Gmail app passwords stored in `gmail_accounts.
+# app_password_enc`. Pinned to the backend `app/` directory and gitignored
+# so a DB dump alone can't decrypt the passwords. Regenerating this file
+# invalidates every stored credential — accounts must be reconnected.
+_KEY_FILE = Path(__file__).resolve().parents[2] / ".fernet.key"
 
 
 # --- encryption ------------------------------------------------------------
 
 
 def _load_key() -> bytes:
-    """Load or create the Fernet key. Lives next to leads.db, OS-protected by
-    the Database folder's permissions. Regenerating the key will invalidate
-    the stored password (user re-enters)."""
+    """Load or create the Fernet key. Lives in the backend's `app/`
+    directory, gitignored. Regenerating the key invalidates the stored
+    password (user re-enters)."""
     if _KEY_FILE.exists():
         return _KEY_FILE.read_bytes()
     _KEY_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -111,12 +115,12 @@ DEFAULT_WARMUP_CURVE: list[tuple[int, int]] = [
 
 
 def get_warmup_curve() -> list[tuple[int, int]]:
-    """Load curve from safety_state, falling back to the default. Returns
+    """Load curve from ln_safety_state, falling back to the default. Returns
     a list of (threshold_days, cap) pairs sorted by threshold_days."""
     try:
         with connect() as con:
             r = con.execute(
-                "SELECT warmup_curve_json FROM safety_state WHERE id = 1"
+                "SELECT warmup_curve_json FROM ln_safety_state WHERE id = 1"
             ).fetchone()
         raw = r["warmup_curve_json"] if r else None
         if not raw:
@@ -139,7 +143,7 @@ def save_warmup_curve(curve: list[tuple[int, int]]) -> None:
         raise ValueError("warmup curve cannot be empty")
     with connect() as con:
         con.execute(
-            "UPDATE safety_state SET warmup_curve_json = ? WHERE id = 1",
+            "UPDATE ln_safety_state SET warmup_curve_json = ? WHERE id = 1",
             (json.dumps(normalized),),
         )
         con.commit()
@@ -177,7 +181,7 @@ def _roll_if_stale_day(con, today: str) -> None:
     sent_date != today has both sent_today AND bounce_count_today zeroed
     in one pass. Idempotent — safe to call on every read."""
     con.execute(
-        "UPDATE gmail_accounts SET sent_today = 0, bounce_count_today = 0, "
+        "UPDATE ln_gmail_accounts SET sent_today = 0, bounce_count_today = 0, "
         "sent_date = ? WHERE sent_date IS NULL OR sent_date != ?",
         (today, today),
     )
@@ -208,7 +212,7 @@ def list_accounts() -> list[dict]:
             "sent_date, last_sent_at, status, warmup_enabled, "
             "warmup_start_date, consecutive_failures, bounce_count_today, "
             "paused_reason, connected_at, last_verified_at "
-            "FROM gmail_accounts ORDER BY id ASC"
+            "FROM ln_gmail_accounts ORDER BY id ASC"
         ).fetchall()
     curve = get_warmup_curve()
     out = []
@@ -223,7 +227,7 @@ def list_accounts() -> list[dict]:
             "       COUNT(*) AS sent30, "
             "       SUM(CASE WHEN replied_at IS NOT NULL THEN 1 ELSE 0 END) AS replied30, "
             "       SUM(CASE WHEN bounced_at IS NOT NULL THEN 1 ELSE 0 END) AS bounced30 "
-            "FROM leads "
+            "FROM ln_leads "
             "WHERE sent_via_account_id IS NOT NULL "
             "  AND sent_at IS NOT NULL "
             "  AND DATE(sent_at) >= DATE('now', '-30 day') "
@@ -276,19 +280,19 @@ def save_credentials(email_addr: str, app_password: str,
     enc = _encrypt(app_password)
     with connect() as con:
         row = con.execute(
-            "SELECT id FROM gmail_accounts WHERE email = ?", (email_addr,)
+            "SELECT id FROM ln_gmail_accounts WHERE email = ?", (email_addr,)
         ).fetchone()
         if row:
             acc_id = row["id"]
             con.execute(
-                "UPDATE gmail_accounts SET app_password_enc = ?, "
+                "UPDATE ln_gmail_accounts SET app_password_enc = ?, "
                 "display_name = COALESCE(?, display_name), "
                 "last_verified_at = ?, status = 'active' WHERE id = ?",
                 (enc, display_name, now, acc_id),
             )
         else:
             cur = con.execute(
-                "INSERT INTO gmail_accounts (email, app_password_enc, "
+                "INSERT INTO ln_gmail_accounts (email, app_password_enc, "
                 "display_name, connected_at, last_verified_at, sent_date, "
                 "warmup_start_date) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (email_addr, enc, display_name, now, now, _today(), _today()),
@@ -300,7 +304,7 @@ def save_credentials(email_addr: str, app_password: str,
 
 def remove_account(account_id: int) -> None:
     with connect() as con:
-        con.execute("DELETE FROM gmail_accounts WHERE id = ?", (account_id,))
+        con.execute("DELETE FROM ln_gmail_accounts WHERE id = ?", (account_id,))
         con.commit()
 
 
@@ -313,14 +317,14 @@ def set_account_status(account_id: int, status: str) -> None:
             # today's bounce counter) so the account gets a genuinely clean
             # slate. If bounces keep coming they'll re-trip in the usual way.
             con.execute(
-                "UPDATE gmail_accounts SET status = 'active', "
+                "UPDATE ln_gmail_accounts SET status = 'active', "
                 "paused_reason = NULL, consecutive_failures = 0, "
                 "bounce_count_today = 0 WHERE id = ?",
                 (account_id,),
             )
         else:
             con.execute(
-                "UPDATE gmail_accounts SET status = 'paused' WHERE id = ?",
+                "UPDATE ln_gmail_accounts SET status = 'paused' WHERE id = ?",
                 (account_id,),
             )
         con.commit()
@@ -329,7 +333,7 @@ def set_account_status(account_id: int, status: str) -> None:
 def set_account_cap(account_id: int, daily_cap: int) -> None:
     with connect() as con:
         con.execute(
-            "UPDATE gmail_accounts SET daily_cap = ? WHERE id = ?",
+            "UPDATE ln_gmail_accounts SET daily_cap = ? WHERE id = ?",
             (max(1, int(daily_cap)), account_id),
         )
         con.commit()
@@ -342,13 +346,13 @@ def set_account_warmup(account_id: int, enabled: bool,
     with connect() as con:
         if reset_start:
             con.execute(
-                "UPDATE gmail_accounts SET warmup_enabled = ?, "
+                "UPDATE ln_gmail_accounts SET warmup_enabled = ?, "
                 "warmup_start_date = ? WHERE id = ?",
                 (1 if enabled else 0, _today(), account_id),
             )
         else:
             con.execute(
-                "UPDATE gmail_accounts SET warmup_enabled = ? WHERE id = ?",
+                "UPDATE ln_gmail_accounts SET warmup_enabled = ? WHERE id = ?",
                 (1 if enabled else 0, account_id),
             )
         con.commit()
@@ -357,7 +361,7 @@ def set_account_warmup(account_id: int, enabled: bool,
 def get_account_creds(account_id: int) -> Optional[tuple[str, str]]:
     with connect() as con:
         r = con.execute(
-            "SELECT email, app_password_enc FROM gmail_accounts WHERE id = ?",
+            "SELECT email, app_password_enc FROM ln_gmail_accounts WHERE id = ?",
             (account_id,),
         ).fetchone()
     if not r:
@@ -410,7 +414,7 @@ def pick_next_account_id() -> Optional[int]:
         rows = con.execute(
             "SELECT id, sent_today, sent_date, daily_cap, last_sent_at, "
             "       warmup_enabled, warmup_start_date, connected_at "
-            "FROM gmail_accounts WHERE status = 'active' "
+            "FROM ln_gmail_accounts WHERE status = 'active' "
             "ORDER BY sent_today ASC, COALESCE(last_sent_at, '') ASC, id ASC"
         ).fetchall()
         curve = get_warmup_curve()
@@ -446,7 +450,7 @@ def seconds_until_next_account() -> Optional[int]:
         rows = con.execute(
             "SELECT sent_today, sent_date, daily_cap, last_sent_at, "
             "       warmup_enabled, warmup_start_date, connected_at "
-            "FROM gmail_accounts WHERE status = 'active'"
+            "FROM ln_gmail_accounts WHERE status = 'active'"
         ).fetchall()
         curve = get_warmup_curve()
     for r in rows:
@@ -478,7 +482,7 @@ def reconcile_today_counts() -> dict:
     today = _today()
     with connect() as con:
         accounts = con.execute(
-            "SELECT id FROM gmail_accounts ORDER BY id ASC"
+            "SELECT id FROM ln_gmail_accounts ORDER BY id ASC"
         ).fetchall()
         if not accounts:
             return {"accounts": 0, "backfilled": 0}
@@ -487,7 +491,7 @@ def reconcile_today_counts() -> dict:
         if len(accounts) == 1:
             only_id = accounts[0]["id"]
             cur = con.execute(
-                "UPDATE leads SET sent_via_account_id = ? "
+                "UPDATE ln_leads SET sent_via_account_id = ? "
                 "WHERE sent_via_account_id IS NULL AND sent_at IS NOT NULL",
                 (only_id,),
             )
@@ -495,19 +499,19 @@ def reconcile_today_counts() -> dict:
 
         for a in accounts:
             count = con.execute(
-                "SELECT COUNT(*) AS n FROM leads "
+                "SELECT COUNT(*) AS n FROM ln_leads "
                 "WHERE sent_via_account_id = ? "
                 "  AND sent_at IS NOT NULL "
                 "  AND substr(sent_at, 1, 10) = ?",
                 (a["id"], today),
             ).fetchone()["n"]
             latest = con.execute(
-                "SELECT MAX(sent_at) AS mx FROM leads "
+                "SELECT MAX(sent_at) AS mx FROM ln_leads "
                 "WHERE sent_via_account_id = ? AND sent_at IS NOT NULL",
                 (a["id"],),
             ).fetchone()["mx"]
             con.execute(
-                "UPDATE gmail_accounts SET sent_today = ?, sent_date = ?, "
+                "UPDATE ln_gmail_accounts SET sent_today = ?, sent_date = ?, "
                 "last_sent_at = COALESCE(?, last_sent_at) WHERE id = ?",
                 (count, today, latest, a["id"]),
             )
@@ -525,18 +529,18 @@ AUTO_PAUSE_BOUNCE_THRESHOLD = 3
 def _record_send(account_id: int, sent_at: str) -> None:
     with connect() as con:
         cur = con.execute(
-            "SELECT sent_date FROM gmail_accounts WHERE id = ?", (account_id,),
+            "SELECT sent_date FROM ln_gmail_accounts WHERE id = ?", (account_id,),
         ).fetchone()
         if cur and cur["sent_date"] != _today():
             con.execute(
-                "UPDATE gmail_accounts SET sent_today = 1, sent_date = ?, "
+                "UPDATE ln_gmail_accounts SET sent_today = 1, sent_date = ?, "
                 "last_sent_at = ?, consecutive_failures = 0, "
                 "bounce_count_today = 0 WHERE id = ?",
                 (_today(), sent_at, account_id),
             )
         else:
             con.execute(
-                "UPDATE gmail_accounts SET sent_today = sent_today + 1, "
+                "UPDATE ln_gmail_accounts SET sent_today = sent_today + 1, "
                 "last_sent_at = ?, consecutive_failures = 0 WHERE id = ?",
                 (sent_at, account_id),
             )
@@ -550,18 +554,18 @@ def record_send_failure(account_id: int, err: str) -> bool:
     reason = f"SMTP failure: {err[:140]}"
     with connect() as con:
         con.execute(
-            "UPDATE gmail_accounts SET consecutive_failures = "
+            "UPDATE ln_gmail_accounts SET consecutive_failures = "
             "COALESCE(consecutive_failures, 0) + 1 WHERE id = ?",
             (account_id,),
         )
         row = con.execute(
-            "SELECT consecutive_failures, status FROM gmail_accounts "
+            "SELECT consecutive_failures, status FROM ln_gmail_accounts "
             "WHERE id = ?", (account_id,),
         ).fetchone()
         if row and row["status"] == "active" and \
            (row["consecutive_failures"] or 0) >= AUTO_PAUSE_FAILURE_THRESHOLD:
             con.execute(
-                "UPDATE gmail_accounts SET status = 'paused', "
+                "UPDATE ln_gmail_accounts SET status = 'paused', "
                 "paused_reason = ? WHERE id = ?",
                 (reason, account_id),
             )
@@ -579,20 +583,20 @@ def record_bounce(account_id: int) -> bool:
     with connect() as con:
         _roll_if_stale_day(con, today)
         cur = con.execute(
-            "SELECT bounce_count_today, status FROM gmail_accounts "
+            "SELECT bounce_count_today, status FROM ln_gmail_accounts "
             "WHERE id = ?", (account_id,),
         ).fetchone()
         if not cur:
             return False
         con.execute(
-            "UPDATE gmail_accounts SET bounce_count_today = "
+            "UPDATE ln_gmail_accounts SET bounce_count_today = "
             "COALESCE(bounce_count_today, 0) + 1 WHERE id = ?",
             (account_id,),
         )
         new_count = (cur["bounce_count_today"] or 0) + 1
         if cur["status"] == "active" and new_count >= AUTO_PAUSE_BOUNCE_THRESHOLD:
             con.execute(
-                "UPDATE gmail_accounts SET status = 'paused', "
+                "UPDATE ln_gmail_accounts SET status = 'paused', "
                 "paused_reason = ? WHERE id = ?",
                 (f"{new_count} bounces today", account_id),
             )
@@ -610,7 +614,7 @@ def get_credentials() -> Optional[tuple[str, str]]:
     get_account_creds(id)."""
     with connect() as con:
         r = con.execute(
-            "SELECT id, email, app_password_enc FROM gmail_accounts "
+            "SELECT id, email, app_password_enc FROM ln_gmail_accounts "
             "WHERE status = 'active' ORDER BY id ASC LIMIT 1"
         ).fetchone()
     if not r:

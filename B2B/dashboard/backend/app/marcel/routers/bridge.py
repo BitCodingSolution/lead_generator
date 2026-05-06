@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from app.services.bridge import ping_bridge, start_bridge_async
+from app.marcel.services.bridge import ping_bridge, start_bridge_async
 
 router = APIRouter(prefix="/api", tags=["bridge"])
 

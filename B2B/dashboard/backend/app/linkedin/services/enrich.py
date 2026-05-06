@@ -135,7 +135,7 @@ def enrich_company(company: Optional[str], *, force: bool = False) -> Optional[s
     with connect() as con:
         if not force:
             row = con.execute(
-                "SELECT summary, fetched_at FROM company_enrichment "
+                "SELECT summary, fetched_at FROM ln_company_enrichment "
                 "WHERE company = ?",
                 (name,),
             ).fetchone()
@@ -161,7 +161,7 @@ def enrich_company(company: Optional[str], *, force: bool = False) -> Optional[s
 
     with connect() as con:
         con.execute(
-            "INSERT INTO company_enrichment (company, summary, source, fetched_at) "
+            "INSERT INTO ln_company_enrichment (company, summary, source, fetched_at) "
             "VALUES (?, ?, ?, ?) "
             "ON CONFLICT(company) DO UPDATE SET "
             "  summary = excluded.summary, "

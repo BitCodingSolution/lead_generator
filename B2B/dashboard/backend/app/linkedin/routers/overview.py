@@ -19,10 +19,10 @@ def overview() -> OverviewResponse:
 
         def cnt(where: str, params: tuple = ()) -> int:
             return con.execute(
-                f"SELECT COUNT(*) FROM leads WHERE {where}", params
+                f"SELECT COUNT(*) FROM ln_leads WHERE {where}", params
             ).fetchone()[0]
 
-        total = con.execute("SELECT COUNT(*) FROM leads").fetchone()[0]
+        total = con.execute("SELECT COUNT(*) FROM ln_leads").fetchone()[0]
         new = cnt("status = 'New'")
         drafted = cnt("status = 'Drafted'")
         queued = cnt("status IN ('Queued', 'Sending')")
@@ -37,17 +37,17 @@ def overview() -> OverviewResponse:
         # per reply, so two unhandled mails from the same lead must show
         # as 2 in the badge.
         replied_pending = con.execute(
-            "SELECT COUNT(*) FROM replies "
+            "SELECT COUNT(*) FROM ln_replies "
             "WHERE kind = 'reply' AND handled_at IS NULL"
         ).fetchone()[0]
         bounced = cnt("status = 'Bounced'")
 
-        safety = con.execute("SELECT * FROM safety_state WHERE id=1").fetchone()
+        safety = con.execute("SELECT * FROM ln_safety_state WHERE id=1").fetchone()
         gmail_row = con.execute(
-            "SELECT 1 FROM gmail_accounts LIMIT 1"
+            "SELECT 1 FROM ln_gmail_accounts LIMIT 1"
         ).fetchone()
         auto_paused = con.execute(
-            "SELECT id, email, paused_reason FROM gmail_accounts "
+            "SELECT id, email, paused_reason FROM ln_gmail_accounts "
             "WHERE status = 'paused' AND paused_reason IS NOT NULL"
         ).fetchall()
 
@@ -121,7 +121,7 @@ def update_safety(patch: SafetyPatch):
     sets = ", ".join(f"{k} = ?" for k in db_updates)
     with connect() as con:
         con.execute(
-            f"UPDATE safety_state SET {sets} WHERE id = 1",
+            f"UPDATE ln_safety_state SET {sets} WHERE id = 1",
             list(db_updates.values()),
         )
         _log_event(con, "safety_update", meta=updates)
@@ -133,12 +133,12 @@ def update_safety(patch: SafetyPatch):
 def get_safety() -> SafetyState:
     with connect() as con:
         _roll_daily_counter(con)
-        r = con.execute("SELECT * FROM safety_state WHERE id=1").fetchone()
+        r = con.execute("SELECT * FROM ln_safety_state WHERE id=1").fetchone()
         if r is None:
             raise HTTPException(500, "safety_state missing")
         today_iso = dt.date.today().isoformat()
         ap_row = con.execute(
-            "SELECT fired_at, total_queued, status FROM autopilot_runs "
+            "SELECT fired_at, total_queued, status FROM ln_autopilot_runs "
             "WHERE fired_date = ? ORDER BY id DESC LIMIT 1",
             (today_iso,),
         ).fetchone()
@@ -234,7 +234,7 @@ def reset_autopilot_today():
     today_iso = dt.date.today().isoformat()
     with connect() as con:
         cur = con.execute(
-            "DELETE FROM autopilot_runs WHERE fired_date = ?", (today_iso,)
+            "DELETE FROM ln_autopilot_runs WHERE fired_date = ?", (today_iso,)
         )
         deleted = cur.rowcount
         _log_event(con, "autopilot_reset", meta={"deleted": deleted})

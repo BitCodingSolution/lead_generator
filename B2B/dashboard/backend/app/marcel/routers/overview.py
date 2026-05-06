@@ -5,13 +5,12 @@ These are the endpoints that drive the main dashboard cards / charts.
 from __future__ import annotations
 
 import datetime as dt
-import sqlite3
 
 from fastapi import APIRouter
 
 from app.config import settings
-from app.db import q_all, q_one
-from app.services.sources import all_sources
+from app.marcel.db import q_all, q_one
+from app.marcel.services.sources import all_sources
 
 router = APIRouter(prefix="/api", tags=["overview"])
 
@@ -20,7 +19,6 @@ router = APIRouter(prefix="/api", tags=["overview"])
 def health() -> dict:
     return {
         "ok": True,
-        "db": str(settings.db_path),
         "time": dt.datetime.now().isoformat(),
     }
 
@@ -105,15 +103,17 @@ def overview() -> dict:
     grab_sent_today = 0
     grab_total_sent = 0
     leads_by_source: dict[str, int] = {"marcel": marcel_leads}
+    from app.linkedin.db import connect as _pg_connect  # local: avoid cycle
     for sid, src in all_sources().items():
         if src.type != "grab":
             continue
         per_source = 0
-        if src.db_path.exists():
+        if src.leads_table:
             try:
-                c = sqlite3.connect(str(src.db_path))
-                per_source = c.execute("SELECT COUNT(*) FROM leads").fetchone()[0]
-                c.close()
+                with _pg_connect() as con:
+                    per_source = con.execute(
+                        f"SELECT COUNT(*) FROM {src.leads_table}"
+                    ).fetchone()[0]
             except Exception:
                 pass
         leads_by_source[sid] = per_source

@@ -16,8 +16,8 @@ router = APIRouter(prefix="/api/linkedin", tags=["linkedin-extras"])
 def list_cvs():
     with connect() as con:
         rows = con.execute(
-            "SELECT id, cluster, filename, size_bytes, uploaded_at "
-            "FROM cvs ORDER BY cluster"
+            "SELECT id, cluster, filename, stored_path, size_bytes, uploaded_at "
+            "FROM ln_cvs ORDER BY cluster"
         ).fetchall()
     configured = {r["cluster"] for r in rows}
     missing = [c for c in CV_CLUSTERS if c not in configured]
@@ -46,16 +46,16 @@ async def upload_cv(cluster: str = Form(...), file: UploadFile = File(...)):
     with connect() as con:
         # One CV per cluster — replace on re-upload.
         prev = con.execute(
-            "SELECT stored_path FROM cvs WHERE cluster = ?", (cluster,)
+            "SELECT stored_path FROM ln_cvs WHERE cluster = ?", (cluster,)
         ).fetchone()
         if prev:
             try:
                 Path(prev["stored_path"]).unlink(missing_ok=True)
             except Exception:
                 pass
-            con.execute("DELETE FROM cvs WHERE cluster = ?", (cluster,))
+            con.execute("DELETE FROM ln_cvs WHERE cluster = ?", (cluster,))
         con.execute(
-            "INSERT INTO cvs (cluster, filename, stored_path, size_bytes, uploaded_at) "
+            "INSERT INTO ln_cvs (cluster, filename, stored_path, size_bytes, uploaded_at) "
             "VALUES (?, ?, ?, ?, ?)",
             (cluster, file.filename, str(target), size, _now_iso()),
         )
@@ -69,7 +69,7 @@ async def upload_cv(cluster: str = Form(...), file: UploadFile = File(...)):
 def delete_cv(cv_id: int):
     with connect() as con:
         row = con.execute(
-            "SELECT stored_path FROM cvs WHERE id = ?", (cv_id,)
+            "SELECT stored_path FROM ln_cvs WHERE id = ?", (cv_id,)
         ).fetchone()
         if row is None:
             raise HTTPException(404, "CV not found")
@@ -77,7 +77,7 @@ def delete_cv(cv_id: int):
             Path(row["stored_path"]).unlink(missing_ok=True)
         except Exception:
             pass
-        con.execute("DELETE FROM cvs WHERE id = ?", (cv_id,))
+        con.execute("DELETE FROM ln_cvs WHERE id = ?", (cv_id,))
         _log(con, "cv_delete", meta={"id": cv_id})
         con.commit()
     return {"ok": True}

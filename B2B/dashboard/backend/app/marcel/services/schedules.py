@@ -13,9 +13,9 @@ import threading
 import time
 
 from app.config import settings
-from app.services.jobs import LAST_RUNS, start_chain_job
-from app.services.scrape_args import schema_flag_args
-from app.services.sources import get_source
+from app.marcel.services.jobs import LAST_RUNS, start_chain_job
+from app.marcel.services.scrape_args import schema_flag_args
+from app.marcel.services.sources import get_source
 
 
 def load_schedules() -> dict:

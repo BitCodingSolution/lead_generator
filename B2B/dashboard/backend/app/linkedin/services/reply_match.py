@@ -41,7 +41,7 @@ def match_reply_to_lead(con, in_reply_to: str, references: str,
     if candidates:
         placeholders = ",".join(["?"] * len(candidates))
         row = con.execute(
-            f"SELECT id FROM leads WHERE sent_message_id IN ({placeholders}) LIMIT 1",
+            f"SELECT id FROM ln_leads WHERE sent_message_id IN ({placeholders}) LIMIT 1",
             candidates,
         ).fetchone()
         if row:
@@ -58,7 +58,7 @@ def match_reply_to_lead(con, in_reply_to: str, references: str,
     if not cleaned_norm:
         return None
     rows = con.execute(
-        "SELECT id, gen_subject FROM leads "
+        "SELECT id, gen_subject FROM ln_leads "
         "WHERE status IN ('Sent', 'Replied') "
         "  AND LOWER(TRIM(email)) = ? "
         "  AND gen_subject IS NOT NULL "

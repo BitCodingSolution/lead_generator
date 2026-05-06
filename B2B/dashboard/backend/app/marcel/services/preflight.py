@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 from app.config import settings
-from app.db import q_one
-from app.services.bridge import ping_bridge
-from app.services.outlook import check_outlook
+from app.marcel.db import q_one
+from app.marcel.services.bridge import ping_bridge
+from app.marcel.services.outlook import check_outlook
 
 
 def preflight_report() -> dict:

@@ -17,7 +17,7 @@ def list_extension_keys():
     with connect() as con:
         rows = con.execute(
             "SELECT key, label, created_at, last_used_at "
-            "FROM extension_keys ORDER BY created_at DESC"
+            "FROM ln_extension_keys ORDER BY created_at DESC"
         ).fetchall()
         return {"rows": [dict(r) for r in rows]}
 
@@ -28,7 +28,7 @@ def create_extension_key(payload: ExtensionKeyIn):
     now = dt.datetime.now().isoformat(timespec="seconds")
     with connect() as con:
         con.execute(
-            "INSERT INTO extension_keys (key, label, created_at) VALUES (?, ?, ?)",
+            "INSERT INTO ln_extension_keys (key, label, created_at) VALUES (?, ?, ?)",
             (key, payload.label.strip(), now),
         )
         con.commit()
@@ -38,7 +38,7 @@ def create_extension_key(payload: ExtensionKeyIn):
 @router.post("/extension/keys/{key}/revoke")
 def revoke_extension_key(key: str):
     with connect() as con:
-        cur = con.execute("DELETE FROM extension_keys WHERE key = ?", (key,))
+        cur = con.execute("DELETE FROM ln_extension_keys WHERE key = ?", (key,))
         con.commit()
         if cur.rowcount == 0:
             raise HTTPException(404, "Key not found")
@@ -121,7 +121,7 @@ def account_warning(
     ).isoformat(timespec="seconds")
     with connect() as con:
         con.execute(
-            "UPDATE safety_state SET warning_paused_until = ? WHERE id = 1",
+            "UPDATE ln_safety_state SET warning_paused_until = ? WHERE id = 1",
             (paused_until,),
         )
         _log_event(con, "warning", meta={"phrase": payload.phrase, "url": payload.url})
@@ -139,17 +139,17 @@ def tracking_pixel(token: str, request: Request):
         client = request.client.host if request.client else None
         with connect() as con:
             row = con.execute(
-                "SELECT id FROM leads WHERE open_token = ?", (token,),
+                "SELECT id FROM ln_leads WHERE open_token = ?", (token,),
             ).fetchone()
             if row:
                 now = dt.datetime.now().isoformat(timespec="seconds")
                 con.execute(
-                    "INSERT INTO email_opens (lead_id, opened_at, user_agent, ip) "
+                    "INSERT INTO ln_email_opens (lead_id, opened_at, user_agent, ip) "
                     "VALUES (?, ?, ?, ?)",
                     (row["id"], now, ua, client),
                 )
                 con.execute(
-                    "UPDATE leads SET open_count = COALESCE(open_count, 0) + 1, "
+                    "UPDATE ln_leads SET open_count = COALESCE(open_count, 0) + 1, "
                     "first_opened_at = COALESCE(first_opened_at, ?), "
                     "last_opened_at = ? WHERE id = ?",
                     (now, now, row["id"]),

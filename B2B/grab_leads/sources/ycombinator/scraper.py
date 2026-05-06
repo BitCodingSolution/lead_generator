@@ -15,6 +15,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 import time
@@ -26,18 +27,40 @@ import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from common.base_scraper import BaseScraper
+# common.db (imported transitively by base_scraper) puts dashboard/backend
+# on sys.path, so app.yc.models resolves here.
+from app.yc.models import YcLead
 
 
 ALGOLIA_URL = "https://45bwzj1sgc-dsn.algolia.net/1/indexes/YCCompany_production/query"
 ALGOLIA_APP_ID = "45BWZJ1SGC"
-# Public search-only key extracted from window.AlgoliaOpts on /companies page.
-# If this key rotates, refresh it from the page source.
-ALGOLIA_API_KEY = (
-    "NzllNTY5MzJiZGM2OTY2ZTQwMDEzOTNhYWZiZGRjODlhYzVkNjBmOGRjNzJiMWM4ZTU0ZDlhYTZjOTJi"
-    "MjlhMWFuYWx5dGljc1RhZ3M9eWNkYyZyZXN0cmljdEluZGljZXM9WUNDb21wYW55X3Byb2R1Y3Rpb24l"
-    "MkNZQ0NvbXBhbnlfQnlfTGF1bmNoX0RhdGVfcHJvZHVjdGlvbiZ0YWdGaWx0ZXJzPSU1QiUyMnljZGNf"
-    "cHVibGljJTIyJTVE"
-)
+
+
+def _load_algolia_key() -> str:
+    """Return the public search-only Algolia key for YC's /companies index.
+
+    Read from `ALGOLIA_API_KEY` in the environment. If unset, fall back
+    to parsing `dashboard/backend/.env` so the scraper works whether
+    it's invoked from the FastAPI backend (env already loaded) or run
+    standalone from this folder.
+    """
+    key = os.environ.get("ALGOLIA_API_KEY", "").strip().strip('"').strip("'")
+    if key:
+        return key
+    # parents[3] = B2B repo root (this file is at B2B/grab_leads/sources/ycombinator/scraper.py)
+    env_path = Path(__file__).resolve().parents[3] / "dashboard" / "backend" / ".env"
+    if env_path.is_file():
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line.startswith("ALGOLIA_API_KEY="):
+                return line.split("=", 1)[1].strip().strip('"').strip("'")
+    raise RuntimeError(
+        "ALGOLIA_API_KEY not set. Add it to dashboard/backend/.env "
+        "(public search-only key from window.AlgoliaOpts on YC /companies)."
+    )
+
+
+ALGOLIA_API_KEY = _load_algolia_key()
 PAGE_SIZE = 100  # Algolia hard-caps hitsPerPage; 100 is safe.
 
 
@@ -53,6 +76,7 @@ def _domain(url: str | None) -> str | None:
 
 class YCScraper(BaseScraper):
     source_name = "ycombinator"
+    leads_model = YcLead
 
     def _query_page(self, page: int, filters: str | None) -> dict:
         body = {"query": "", "hitsPerPage": PAGE_SIZE, "page": page}
@@ -199,7 +223,7 @@ def main():
     print("\n=== SUMMARY ===")
     for k, v in stats.items():
         print(f"  {k}: {v}")
-    print(f"\nDB: {scraper.db_path}")
+    print(f"\nDB: postgres → {scraper.leads_model.__tablename__}")
 
 
 if __name__ == "__main__":

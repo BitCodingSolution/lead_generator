@@ -27,7 +27,7 @@ def linkedin_analytics(days: int = 30):
     with connect() as con:
         def per_day(column: str, where_extra: str = "") -> dict[str, int]:
             rows = con.execute(
-                f"SELECT DATE({column}) AS d, COUNT(*) AS n FROM leads "
+                f"SELECT DATE({column}) AS d, COUNT(*) AS n FROM ln_leads "
                 f"WHERE {column} IS NOT NULL AND DATE({column}) >= ? "
                 f"      {('AND ' + where_extra) if where_extra else ''} "
                 f"GROUP BY DATE({column})",
@@ -40,7 +40,7 @@ def linkedin_analytics(days: int = 30):
         bounced_map = per_day("bounced_at")
 
         drafted_rows = con.execute(
-            "SELECT DATE(at) AS d, COUNT(*) AS n FROM events "
+            "SELECT DATE(at) AS d, COUNT(*) AS n FROM ln_events "
             "WHERE kind = 'draft' AND DATE(at) >= ? "
             "GROUP BY DATE(at)",
             (start.isoformat(),),
@@ -48,17 +48,17 @@ def linkedin_analytics(days: int = 30):
         drafted_map = {r["d"]: int(r["n"]) for r in drafted_rows}
 
         totals = {
-            "total_leads": con.execute("SELECT COUNT(*) FROM leads").fetchone()[0],
+            "total_leads": con.execute("SELECT COUNT(*) FROM ln_leads").fetchone()[0],
             "sent": con.execute(
-                "SELECT COUNT(*) FROM leads WHERE sent_at IS NOT NULL"
+                "SELECT COUNT(*) FROM ln_leads WHERE sent_at IS NOT NULL"
             ).fetchone()[0],
             "replied": con.execute(
-                "SELECT COUNT(*) FROM leads WHERE replied_at IS NOT NULL"
+                "SELECT COUNT(*) FROM ln_leads WHERE replied_at IS NOT NULL"
             ).fetchone()[0],
             "bounced": con.execute(
-                "SELECT COUNT(*) FROM leads WHERE bounced_at IS NOT NULL"
+                "SELECT COUNT(*) FROM ln_leads WHERE bounced_at IS NOT NULL"
             ).fetchone()[0],
-            "recyclebin": con.execute("SELECT COUNT(*) FROM recyclebin").fetchone()[0],
+            "recyclebin": con.execute("SELECT COUNT(*) FROM ln_recyclebin").fetchone()[0],
         }
 
     series: list[dict] = []
@@ -215,9 +215,9 @@ def outreach_stats():
         rows = con.execute(
             "SELECT l.id, l.gen_subject, l.gen_body, l.cv_cluster, l.sent_at, "
             "       l.replied_at, "
-            "       (SELECT sentiment FROM replies WHERE lead_id = l.id "
+            "       (SELECT sentiment FROM ln_replies WHERE lead_id = l.id "
             "        ORDER BY id DESC LIMIT 1) AS sentiment "
-            "FROM leads l WHERE l.sent_at IS NOT NULL"
+            "FROM ln_leads l WHERE l.sent_at IS NOT NULL"
         ).fetchall()
 
     def _bucket() -> dict:
@@ -296,7 +296,7 @@ def outreach_stats():
 def lead_events(lead_id: int, limit: int = 100):
     with connect() as con:
         rows = con.execute(
-            "SELECT id, at, kind, meta_json FROM events "
+            "SELECT id, at, kind, meta_json FROM ln_events "
             "WHERE lead_id = ? ORDER BY at DESC LIMIT ?",
             (lead_id, limit),
         ).fetchall()
@@ -321,7 +321,7 @@ def export_leads():
     ]
     with connect() as con:
         rows = con.execute(
-            f"SELECT {', '.join(cols)} FROM leads ORDER BY first_seen_at DESC"
+            f"SELECT {', '.join(cols)} FROM ln_leads ORDER BY first_seen_at DESC"
         ).fetchall()
     return _csv_response(
         f"linkedin_leads_{dt.date.today().isoformat()}.csv",
