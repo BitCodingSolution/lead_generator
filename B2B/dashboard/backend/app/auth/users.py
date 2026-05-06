@@ -142,6 +142,53 @@ def delete_user(username: str) -> bool:
         return True
 
 
+def delete_user_by_id(user_id: int) -> bool:
+    with _session() as s:
+        row = s.get(UserRow, user_id)
+        if row is None:
+            return False
+        s.delete(row)
+        s.commit()
+        return True
+
+
+def update_user(
+    user_id: int,
+    *,
+    username: str | None = None,
+    password: str | None = None,
+) -> User | None:
+    """Update one or both fields. Returns the projected User on success,
+    None if the user_id doesn't exist. Raises ValueError on validation
+    errors (short password, blank/duplicate username)."""
+    if username is not None:
+        username = username.strip()
+        if not username:
+            raise ValueError("username is required")
+    if password is not None and len(password) < 8:
+        raise ValueError("password must be at least 8 characters")
+    with _session() as s:
+        row = s.get(UserRow, user_id)
+        if row is None:
+            return None
+        if username is not None:
+            row.username = username
+        if password is not None:
+            row.password_hash = hash_password(password)
+        try:
+            s.commit()
+        except IntegrityError as e:
+            s.rollback()
+            raise ValueError(f"username '{username}' already exists") from e
+        s.refresh(row)
+        return _project(row)
+
+
+def count_users() -> int:
+    with _session() as s:
+        return s.query(UserRow).count()
+
+
 def list_users() -> list[User]:
     with _session() as s:
         rows = s.query(UserRow).order_by(UserRow.id).all()

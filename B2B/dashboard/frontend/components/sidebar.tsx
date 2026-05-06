@@ -12,6 +12,7 @@ import {
   Briefcase,
   Inbox,
   Settings,
+  Users as UsersIcon,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { usePendingReplies } from "@/lib/use-pending-replies"
@@ -36,6 +37,7 @@ const SECTIONS: NavSection[] = [
       { href: "/campaigns", label: "Campaigns", icon: Rocket },
       { href: "/replies", label: "Replies", icon: MessageSquareReply },
       { href: "/analytics", label: "Analytics", icon: BarChart3 },
+      { href: "/users", label: "Users", icon: UsersIcon },
     ],
   },
   {

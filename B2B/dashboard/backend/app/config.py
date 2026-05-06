@@ -96,6 +96,7 @@ class Settings(BaseSettings):
             "http://127.0.0.1:3000",
             "http://localhost:3001",
             "http://127.0.0.1:3001",
+            "https://b2b.bitcodingsolutions.com"
         ]
         if self.dashboard_extra_origins.strip():
             base.extend(

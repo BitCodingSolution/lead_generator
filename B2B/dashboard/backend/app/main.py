@@ -252,53 +252,53 @@ app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
 # Startup hooks
 # ---------------------------------------------------------------------------
 
-# @app.on_event("startup")
-# def _start_scheduler() -> None:
-#     from app.marcel.services.schedules import start_scheduler_thread
-#     start_scheduler_thread()
+@app.on_event("startup")
+def _start_scheduler() -> None:
+    from app.marcel.services.schedules import start_scheduler_thread
+    start_scheduler_thread()
 
 
-# @app.on_event("startup")
-# def _linkedin_startup_cleanup() -> None:
-#     """Revert any leads stuck mid-send + reconcile Gmail per-account counters."""
-#     try:
-#         _reset_orphans()
-#     except Exception as e:
-#         print(f"[linkedin] startup orphan reset failed: {e}")
-#     try:
-#         from linkedin_gmail import reconcile_today_counts
-#         info = reconcile_today_counts()
-#         print(f"[linkedin] gmail account counters reconciled: {info}")
-#     except Exception as e:
-#         print(f"[linkedin] account counter reconcile failed: {e}")
+@app.on_event("startup")
+def _linkedin_startup_cleanup() -> None:
+    """Revert any leads stuck mid-send + reconcile Gmail per-account counters."""
+    try:
+        _reset_orphans()
+    except Exception as e:
+        print(f"[linkedin] startup orphan reset failed: {e}")
+    try:
+        from app.linkedin.services.gmail import reconcile_today_counts
+        info = reconcile_today_counts()
+        print(f"[linkedin] gmail account counters reconciled: {info}")
+    except Exception as e:
+        print(f"[linkedin] account counter reconcile failed: {e}")
 
 
-# @app.on_event("startup")
-# def _start_linkedin_poll() -> None:
-#     def _loop():
-#         from linkedin_api import (
-#             _autopilot_tick,
-#             _digest_tick,
-#             _followups_tick,
-#             _poll_and_store,
-#             _scheduler_tick,
-#             _stale_drafts_sweep,
-#         )
-#         from linkedin_gmail import get_credentials as _gmail_creds
-#         tick = 0
-#         while True:
-#             try:
-#                 _autopilot_tick()
-#                 _scheduler_tick()
-#                 if tick % 5 == 0 and _gmail_creds() is not None:
-#                     _poll_and_store()
-#                 if tick % 60 == 0:
-#                     _stale_drafts_sweep()
-#                 _digest_tick()
-#                 _followups_tick()
-#             except Exception as e:
-#                 print(f"[linkedin-poll] {e}")
-#             tick += 1
-#             time.sleep(60)
+@app.on_event("startup")
+def _start_linkedin_poll() -> None:
+    def _loop():
+        from app.linkedin.api import (
+            _autopilot_tick,
+            _digest_tick,
+            _followups_tick,
+            _poll_and_store,
+            _scheduler_tick,
+            _stale_drafts_sweep,
+        )
+        from app.linkedin.services.gmail import get_credentials as _gmail_creds
+        tick = 0
+        while True:
+            try:
+                _autopilot_tick()
+                _scheduler_tick()
+                if tick % 5 == 0 and _gmail_creds() is not None:
+                    _poll_and_store()
+                if tick % 60 == 0:
+                    _stale_drafts_sweep()
+                _digest_tick()
+                _followups_tick()
+            except Exception as e:
+                print(f"[linkedin-poll] {e}")
+            tick += 1
+            time.sleep(60)
 
-#     threading.Thread(target=_loop, daemon=True).start()
+    threading.Thread(target=_loop, daemon=True).start()
